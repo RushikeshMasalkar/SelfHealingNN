@@ -1,0 +1,14 @@
+# Ignore dataset folder
+data/
+
+# Ignore trained models
+*.pth
+
+# Python cache
+__pycache__/
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# system files
+.DS_Store
