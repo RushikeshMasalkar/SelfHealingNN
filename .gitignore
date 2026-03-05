@@ -1,14 +1,8 @@
-# Ignore dataset folder
-data/
+data/*
+!data/.gitkeep
 
-# Ignore trained models
-*.pth
+models/*
+!models/.gitkeep
 
-# Python cache
 __pycache__/
-
-# Jupyter temporary files
 .ipynb_checkpoints/
-
-# system files
-.DS_Store
