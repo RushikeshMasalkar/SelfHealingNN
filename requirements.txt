@@ -1,14 +1,13 @@
-# Core ML
 torch>=2.0.0
 torchvision>=0.15.0
-numpy>=1.24.0
-pandas>=2.0.0
-
-# Image processing
-Pillow>=10.0.0
-
-# Dashboard
-streamlit>=1.28.0
-
-# Notebook environment
-jupyterlab>=4.0.0
+numpy
+matplotlib
+Pillow
+scikit-image
+scikit-learn
+pandas
+pyyaml
+tqdm
+jupyter
+torchinfo
+seaborn

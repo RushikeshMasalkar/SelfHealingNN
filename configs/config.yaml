@@ -1,0 +1,38 @@
+# Dataset
+dataset:
+  name: imagenet100
+  root: ./data/raw/
+  image_size: 224
+  num_classes: 100
+  train_split: 0.8
+
+# Noise
+noise:
+  types: [gaussian, salt_pepper, occlusion]
+  gaussian_std: 0.3
+  salt_pepper_prob: 0.1
+  occlusion_size: 32
+
+# ConvVAE
+vae:
+  latent_dim: 512
+  encoder_channels: [64, 128, 256, 512]
+  beta: 0.5
+  learning_rate: 0.0003
+  epochs: 50
+  batch_size: 32
+
+# ResNet Classifier
+classifier:
+  backbone: resnet18
+  pretrained: true
+  learning_rate: 0.0001
+  epochs: 30
+  batch_size: 32
+
+# Training
+training:
+  device: cuda
+  num_workers: 4
+  save_every: 5
+  early_stopping_patience: 7

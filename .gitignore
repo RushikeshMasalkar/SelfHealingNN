@@ -1,59 +1,17 @@
-# ──────────────────────────────────────────────
-# Python
-# ──────────────────────────────────────────────
+data/raw/
+data/processed/
+models/*.pth
 __pycache__/
-*.py[cod]
-*.pyo
-*.egg-info/
-*.egg
-dist/
-build/
+.ipynb_checkpoints/
+node_modules/
+.env
+*.log
+outputs/
 
-# ──────────────────────────────────────────────
-# Virtual Environments
-# ──────────────────────────────────────────────
 venv/
 .venv/
 env/
-.env/
-
-# ──────────────────────────────────────────────
-# Jupyter Notebook checkpoints
-# ──────────────────────────────────────────────
-**/.ipynb_checkpoints/
-
-# ──────────────────────────────────────────────
-# IDE / Editor
-# ──────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# ──────────────────────────────────────────────
-# OS generated files
-# ──────────────────────────────────────────────
+*.py[cod]
 .DS_Store
 Thumbs.db
-desktop.ini
-
-# ──────────────────────────────────────────────
-# DATA FOLDERS (datasets go here)
-# ──────────────────────────────────────────────
-data/*
-!data/.gitkeep
-!data/imagenet100/
-data/imagenet100/*
-!data/imagenet100/.gitkeep
-
-# ──────────────────────────────────────────────
-# TRAINED MODEL WEIGHTS
-# ──────────────────────────────────────────────
-models/*
-!models/.gitkeep
-*.pth
-*.pt
-*.h5
-*.onnx
-*.pkl
+.vscode/
