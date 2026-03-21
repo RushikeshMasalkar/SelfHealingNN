@@ -39,57 +39,21 @@ Thumbs.db
 desktop.ini
 
 # ──────────────────────────────────────────────
-# MNIST dataset (auto-downloaded by PyTorch)
+# DATA FOLDERS (datasets go here)
 # ──────────────────────────────────────────────
 data/*
 !data/.gitkeep
+!data/imagenet100/
+data/imagenet100/*
+!data/imagenet100/.gitkeep
 
 # ──────────────────────────────────────────────
-# Trained model weights (large .pth files)
+# TRAINED MODEL WEIGHTS
 # ──────────────────────────────────────────────
 models/*
 !models/.gitkeep
-
-# ──────────────────────────────────────────────
-# Medical X-Ray dataset (download separately)
-# ──────────────────────────────────────────────
-medical_data/*
-!medical_data/.gitkeep
-!medical_data/train/
-!medical_data/test/
-!medical_data/val/
-
-medical_data/train/*
-!medical_data/train/.gitkeep
-!medical_data/train/NORMAL/
-!medical_data/train/PNEUMONIA/
-medical_data/train/NORMAL/*
-!medical_data/train/NORMAL/.gitkeep
-medical_data/train/PNEUMONIA/*
-!medical_data/train/PNEUMONIA/.gitkeep
-
-medical_data/test/*
-!medical_data/test/.gitkeep
-!medical_data/test/NORMAL/
-!medical_data/test/PNEUMONIA/
-medical_data/test/NORMAL/*
-!medical_data/test/NORMAL/.gitkeep
-medical_data/test/PNEUMONIA/*
-!medical_data/test/PNEUMONIA/.gitkeep
-
-medical_data/val/*
-!medical_data/val/.gitkeep
-!medical_data/val/NORMAL/
-!medical_data/val/PNEUMONIA/
-medical_data/val/NORMAL/*
-!medical_data/val/NORMAL/.gitkeep
-medical_data/val/PNEUMONIA/*
-!medical_data/val/PNEUMONIA/.gitkeep
-
-# ──────────────────────────────────────────────
-# Notebooks local data & models (duplicates)
-# ──────────────────────────────────────────────
-notebooks/data/*
-!notebooks/data/.gitkeep
-notebooks/models/*
-!notebooks/models/.gitkeep
+*.pth
+*.pt
+*.h5
+*.onnx
+*.pkl
