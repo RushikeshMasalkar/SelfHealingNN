@@ -15,12 +15,12 @@ noise:
 
 # ConvVAE
 vae:
-  latent_dim: 512
+  latent_dim: 256
   encoder_channels: [64, 128, 256, 512]
-  beta: 0.5
+  beta: 0.2
   learning_rate: 0.0003
   epochs: 50
-  batch_size: 32
+  batch_size: 16
 
 # ResNet Classifier
 classifier:
@@ -33,6 +33,6 @@ classifier:
 # Training
 training:
   device: cuda
-  num_workers: 4
+  num_workers: 6
   save_every: 5
   early_stopping_patience: 7
