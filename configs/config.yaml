@@ -18,9 +18,11 @@ vae:
   latent_dim: 256
   encoder_channels: [64, 128, 256, 512]
   beta: 0.2
-  learning_rate: 0.0003
+  learning_rate: 0.0001
   epochs: 50
   batch_size: 16
+  denormalize_targets: true
+  disable_amp_until_stable: true
 
 # ResNet Classifier
 classifier:
@@ -36,3 +38,7 @@ training:
   num_workers: 6
   save_every: 5
   early_stopping_patience: 7
+  checkpoint_interval: 2
+  auto_resume: true
+  amp: true
+  grad_clip_norm: 1.0

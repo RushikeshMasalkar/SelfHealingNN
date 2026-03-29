@@ -68,6 +68,7 @@ class ConvVAE(nn.Module):
         self.decoder = ConvDecoder(latent_dim=latent_dim)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
@@ -87,7 +88,8 @@ def vae_loss(
     beta: float = 0.5,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     recon_loss = F.mse_loss(recon_x, x, reduction="mean")
-    kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    stable_logvar = torch.clamp(logvar, min=-10.0, max=10.0)
+    kl = -0.5 * torch.mean(1 + stable_logvar - mu.pow(2) - stable_logvar.exp())
     total = recon_loss + beta * kl
     return total, {
         "recon_loss": float(recon_loss.detach().cpu()),
