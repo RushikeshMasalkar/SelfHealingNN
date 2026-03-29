@@ -10,11 +10,27 @@ from .classifier import SelfHealingClassifier
 from .conv_vae import ConvVAE
 
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def normalize_imagenet(batch: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor(IMAGENET_MEAN, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    return (batch - mean) / std
+
+
 class SelfHealingPipeline(nn.Module):
-    def __init__(self, vae: ConvVAE, classifier: SelfHealingClassifier):
+    def __init__(
+        self,
+        vae: ConvVAE,
+        classifier: SelfHealingClassifier,
+        vae_outputs_denormalized: bool = True,
+    ):
         super().__init__()
         self.vae = vae
         self.classifier = classifier
+        self.vae_outputs_denormalized = vae_outputs_denormalized
 
     @torch.no_grad()
     def heal(self, noisy_image: torch.Tensor) -> torch.Tensor:
@@ -23,7 +39,12 @@ class SelfHealingPipeline(nn.Module):
 
     @torch.no_grad()
     def classify(self, cleaned_image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self.classifier(cleaned_image)
+        classifier_input = (
+            normalize_imagenet(cleaned_image)
+            if self.vae_outputs_denormalized
+            else cleaned_image
+        )
+        logits = self.classifier(classifier_input)
         probs = torch.softmax(logits, dim=1)
         confidence, prediction = torch.max(probs, dim=1)
         return prediction, confidence

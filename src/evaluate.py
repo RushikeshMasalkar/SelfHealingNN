@@ -12,6 +12,17 @@ from torchvision.utils import make_grid
 from .dataset import NoiseInjector
 
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def normalize_imagenet(batch: torch.Tensor) -> torch.Tensor:
+    """Converts [0, 1] image tensors into ImageNet normalized space."""
+    mean = torch.tensor(IMAGENET_MEAN, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    return (batch - mean) / std
+
+
 def compute_psnr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
     orig = original.detach().cpu().permute(1, 2, 0).numpy()
     rec = reconstructed.detach().cpu().permute(1, 2, 0).numpy()
@@ -37,6 +48,8 @@ def evaluate_pipeline(
     test_loader,
     device: str = "cuda",
     noise_levels: Iterable[float] = (0.1, 0.2, 0.3, 0.5, 0.7),
+    vae_outputs_denormalized: bool = True,
+    debug_ranges: bool = False,
 ) -> List[Dict[str, float]]:
     """Evaluates Clean->Classifier, Noisy->Classifier, and Noisy->VAE->Classifier."""
 
@@ -65,7 +78,19 @@ def evaluate_pipeline(
                 noisy_acc.append(_accuracy_from_logits(noisy_logits, labels))
 
                 recon, _, _ = vae(noisy_images)
-                healed_logits = classifier(recon)
+                healed_input = normalize_imagenet(recon) if vae_outputs_denormalized else recon
+
+                if debug_ranges:
+                    print(
+                        "[EvalRanges] "
+                        f"clean=[{images.min().item():.3f},{images.max().item():.3f}] "
+                        f"noisy=[{noisy_images.min().item():.3f},{noisy_images.max().item():.3f}] "
+                        f"recon=[{recon.min().item():.3f},{recon.max().item():.3f}] "
+                        f"healed_input=[{healed_input.min().item():.3f},{healed_input.max().item():.3f}]"
+                    )
+                    debug_ranges = False
+
+                healed_logits = classifier(healed_input)
                 healed_acc.append(_accuracy_from_logits(healed_logits, labels))
 
             results.append(
