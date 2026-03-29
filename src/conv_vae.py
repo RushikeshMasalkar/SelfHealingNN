@@ -86,8 +86,21 @@ def vae_loss(
     mu: torch.Tensor,
     logvar: torch.Tensor,
     beta: float = 0.5,
+    recon_loss_type: str = "smooth_l1",
+    huber_delta: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    recon_loss = F.mse_loss(recon_x, x, reduction="mean")
+    if recon_loss_type == "mse":
+        recon_loss = F.mse_loss(recon_x, x, reduction="mean")
+    elif recon_loss_type == "smooth_l1":
+        recon_loss = F.smooth_l1_loss(recon_x, x, reduction="mean")
+    elif recon_loss_type == "huber":
+        recon_loss = F.huber_loss(recon_x, x, reduction="mean", delta=huber_delta)
+    else:
+        raise ValueError(
+            f"Unsupported recon_loss_type='{recon_loss_type}'. "
+            "Expected one of: mse, smooth_l1, huber."
+        )
+
     stable_logvar = torch.clamp(logvar, min=-10.0, max=10.0)
     kl = -0.5 * torch.mean(1 + stable_logvar - mu.pow(2) - stable_logvar.exp())
     total = recon_loss + beta * kl
@@ -95,4 +108,5 @@ def vae_loss(
         "recon_loss": float(recon_loss.detach().cpu()),
         "kl_loss": float(kl.detach().cpu()),
         "total_loss": float(total.detach().cpu()),
+        "recon_loss_type": recon_loss_type,
     }

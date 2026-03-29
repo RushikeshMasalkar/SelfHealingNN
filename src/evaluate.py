@@ -42,6 +42,17 @@ def _accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return float((preds == labels).float().mean().item())
 
 
+def _topk_accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor, k: int = 5) -> float:
+    _, pred = logits.topk(k, dim=1)
+    correct = pred.eq(labels.view(-1, 1)).any(dim=1).float().mean().item()
+    return float(correct)
+
+
+def _mean_confidence_from_logits(logits: torch.Tensor) -> float:
+    probs = torch.softmax(logits, dim=1)
+    return float(probs.max(dim=1).values.mean().item())
+
+
 def evaluate_pipeline(
     vae,
     classifier,
@@ -63,6 +74,12 @@ def evaluate_pipeline(
             clean_acc = []
             noisy_acc = []
             healed_acc = []
+            clean_top5 = []
+            noisy_top5 = []
+            healed_top5 = []
+            clean_conf = []
+            noisy_conf = []
+            healed_conf = []
 
             for images, labels in test_loader:
                 images = images.to(device)
@@ -70,12 +87,16 @@ def evaluate_pipeline(
 
                 clean_logits = classifier(images)
                 clean_acc.append(_accuracy_from_logits(clean_logits, labels))
+                clean_top5.append(_topk_accuracy_from_logits(clean_logits, labels, k=5))
+                clean_conf.append(_mean_confidence_from_logits(clean_logits))
 
                 noisy_images = torch.stack([
                     injector.add_gaussian_noise(img, std=level) for img in images
                 ])
                 noisy_logits = classifier(noisy_images)
                 noisy_acc.append(_accuracy_from_logits(noisy_logits, labels))
+                noisy_top5.append(_topk_accuracy_from_logits(noisy_logits, labels, k=5))
+                noisy_conf.append(_mean_confidence_from_logits(noisy_logits))
 
                 recon, _, _ = vae(noisy_images)
                 healed_input = normalize_imagenet(recon) if vae_outputs_denormalized else recon
@@ -92,6 +113,8 @@ def evaluate_pipeline(
 
                 healed_logits = classifier(healed_input)
                 healed_acc.append(_accuracy_from_logits(healed_logits, labels))
+                healed_top5.append(_topk_accuracy_from_logits(healed_logits, labels, k=5))
+                healed_conf.append(_mean_confidence_from_logits(healed_logits))
 
             results.append(
                 {
@@ -99,6 +122,12 @@ def evaluate_pipeline(
                     "clean": float(np.mean(clean_acc) * 100.0),
                     "noHealing": float(np.mean(noisy_acc) * 100.0),
                     "withHealing": float(np.mean(healed_acc) * 100.0),
+                    "clean_top5": float(np.mean(clean_top5) * 100.0),
+                    "noHealing_top5": float(np.mean(noisy_top5) * 100.0),
+                    "withHealing_top5": float(np.mean(healed_top5) * 100.0),
+                    "clean_conf": float(np.mean(clean_conf)),
+                    "noHealing_conf": float(np.mean(noisy_conf)),
+                    "withHealing_conf": float(np.mean(healed_conf)),
                 }
             )
 

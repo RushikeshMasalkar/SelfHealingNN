@@ -9,7 +9,7 @@ dataset:
 # Noise
 noise:
   types: [gaussian, salt_pepper, occlusion]
-  gaussian_std: 0.3
+  gaussian_std: 0.2
   salt_pepper_prob: 0.1
   occlusion_size: 32
 
@@ -23,6 +23,10 @@ vae:
   batch_size: 16
   denormalize_targets: true
   disable_amp_until_stable: true
+  beta_schedule: linear_warmup
+  beta_warmup_epochs: 10
+  recon_loss_type: smooth_l1
+  huber_delta: 1.0
 
 # ResNet Classifier
 classifier:
@@ -37,8 +41,10 @@ training:
   device: cuda
   num_workers: 6
   save_every: 5
-  early_stopping_patience: 7
+  early_stopping_patience: 10
   checkpoint_interval: 2
   auto_resume: true
   amp: true
   grad_clip_norm: 1.0
+  vae_early_stop_metric: val_recon
+  classifier_early_stop_metric: val_top1

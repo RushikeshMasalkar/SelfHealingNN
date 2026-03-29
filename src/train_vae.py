@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
@@ -87,6 +88,14 @@ def _epoch_from_checkpoint_path(path: Path) -> int:
         return -1
 
 
+def _batch_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
+    mse = F.mse_loss(pred, target, reduction="mean")
+    mse_value = float(mse.detach().cpu())
+    if mse_value <= 1e-12:
+        return 99.0
+    return float(10.0 * torch.log10(torch.tensor(1.0 / mse_value)).item())
+
+
 def train_vae(
     model: ConvVAE,
     train_loader,
@@ -103,6 +112,11 @@ def train_vae(
     use_amp: bool = True,
     grad_clip_norm: float = 1.0,
     denormalize_targets: bool = True,
+    beta_schedule: str = "constant",
+    beta_warmup_epochs: int = 10,
+    early_stop_metric: str = "val_recon",
+    recon_loss_type: str = "smooth_l1",
+    huber_delta: float = 1.0,
 ) -> Dict[str, List[float]]:
     device = _resolve_device(device)
     model = model.to(device)
@@ -116,9 +130,15 @@ def train_vae(
         "train_recon": [],
         "train_kl": [],
         "train_total": [],
+        "train_psnr": [],
         "val_recon": [],
         "val_kl": [],
         "val_total": [],
+        "val_psnr": [],
+        "lr": [],
+        "beta": [],
+        "recon_loss_type": [],
+        "huber_delta": [],
     }
 
     best_val = float("inf")
@@ -169,10 +189,17 @@ def train_vae(
         return history
 
     for epoch in range(start_epoch, epochs + 1):
+        if beta_schedule == "linear_warmup":
+            warmup = max(beta_warmup_epochs, 1)
+            current_beta = beta * min(epoch / warmup, 1.0)
+        else:
+            current_beta = beta
+
         model.train()
         train_recon = 0.0
         train_kl = 0.0
         train_total = 0.0
+        train_psnr = 0.0
         train_valid_batches = 0
         saw_non_finite = False
 
@@ -185,7 +212,15 @@ def train_vae(
             optimizer.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=amp_enabled):
                 recon, mu, logvar = model(noisy)
-                loss, parts = vae_loss(recon, target_clean, mu, logvar, beta=beta)
+                loss, parts = vae_loss(
+                    recon,
+                    target_clean,
+                    mu,
+                    logvar,
+                    beta=current_beta,
+                    recon_loss_type=recon_loss_type,
+                    huber_delta=huber_delta,
+                )
 
             if not torch.isfinite(loss):
                 saw_non_finite = True
@@ -201,6 +236,7 @@ def train_vae(
             train_recon += parts["recon_loss"]
             train_kl += parts["kl_loss"]
             train_total += parts["total_loss"]
+            train_psnr += _batch_psnr(recon.detach(), target_clean.detach())
             train_valid_batches += 1
 
         if train_valid_batches == 0:
@@ -212,11 +248,13 @@ def train_vae(
         train_recon /= n_train
         train_kl /= n_train
         train_total /= n_train
+        train_psnr /= n_train
 
         model.eval()
         val_recon = 0.0
         val_kl = 0.0
         val_total = 0.0
+        val_psnr = 0.0
         val_valid_batches = 0
 
         with torch.no_grad():
@@ -227,7 +265,15 @@ def train_vae(
                 target_clean = _denormalize_imagenet(clean) if denormalize_targets else clean
                 with autocast("cuda", enabled=amp_enabled):
                     recon, mu, logvar = model(noisy)
-                    val_loss, parts = vae_loss(recon, target_clean, mu, logvar, beta=beta)
+                    val_loss, parts = vae_loss(
+                        recon,
+                        target_clean,
+                        mu,
+                        logvar,
+                        beta=current_beta,
+                        recon_loss_type=recon_loss_type,
+                        huber_delta=huber_delta,
+                    )
 
                 if not torch.isfinite(val_loss):
                     saw_non_finite = True
@@ -236,6 +282,7 @@ def train_vae(
                 val_recon += parts["recon_loss"]
                 val_kl += parts["kl_loss"]
                 val_total += parts["total_loss"]
+                val_psnr += _batch_psnr(recon.detach(), target_clean.detach())
                 val_valid_batches += 1
 
         if val_valid_batches == 0:
@@ -247,13 +294,20 @@ def train_vae(
         val_recon /= n_val
         val_kl /= n_val
         val_total /= n_val
+        val_psnr /= n_val
 
         history["train_recon"].append(train_recon)
         history["train_kl"].append(train_kl)
         history["train_total"].append(train_total)
+        history["train_psnr"].append(train_psnr)
         history["val_recon"].append(val_recon)
         history["val_kl"].append(val_kl)
         history["val_total"].append(val_total)
+        history["val_psnr"].append(val_psnr)
+        history["lr"].append(float(optimizer.param_groups[0]["lr"]))
+        history["beta"].append(float(current_beta))
+        history["recon_loss_type"].append(recon_loss_type)
+        history["huber_delta"].append(float(huber_delta))
 
         scheduler.step()
 
@@ -261,7 +315,10 @@ def train_vae(
             f"Epoch {epoch:03d} | "
             f"recon_loss={train_recon:.4f}/{val_recon:.4f} | "
             f"kl_loss={train_kl:.4f}/{val_kl:.4f} | "
-            f"total_loss={train_total:.4f}/{val_total:.4f}"
+            f"total_loss={train_total:.4f}/{val_total:.4f} | "
+            f"psnr={train_psnr:.2f}/{val_psnr:.2f} | "
+            f"beta={current_beta:.4f} | "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
 
         if saw_non_finite:
@@ -270,8 +327,10 @@ def train_vae(
         if not all(torch.isfinite(torch.tensor(v)) for v in [train_recon, train_kl, train_total, val_recon, val_kl, val_total]):
             raise RuntimeError("Epoch metrics became non-finite. Aborting to avoid corrupt checkpoints.")
 
-        if val_total < best_val:
-            best_val = val_total
+        tracked_metric = val_recon if early_stop_metric == "val_recon" else val_total
+
+        if tracked_metric < best_val:
+            best_val = tracked_metric
             torch.save(model.state_dict(), save_target)
 
         if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
@@ -299,7 +358,7 @@ def train_vae(
                 early_stopper,
             )
 
-        if early_stopper.step(val_total):
+        if early_stopper.step(tracked_metric):
             _save_checkpoint(
                 latest_checkpoint,
                 epoch,

@@ -99,6 +99,7 @@ def _run_epoch(
     total_loss = 0.0
     total_top1 = 0.0
     total_top5 = 0.0
+    total_confidence = 0.0
 
     iterator = tqdm(loader, desc="Train" if train else "Val", leave=False)
     for images, labels in iterator:
@@ -122,13 +123,15 @@ def _run_epoch(
 
         top1 = (logits.argmax(dim=1) == labels).float().mean().item()
         top5 = topk_accuracy(logits, labels, k=5)
+        confidence = torch.softmax(logits, dim=1).max(dim=1).values.mean().item()
 
         total_loss += float(loss.detach().cpu())
         total_top1 += top1
         total_top5 += top5
+        total_confidence += confidence
 
     n = max(len(loader), 1)
-    return total_loss / n, total_top1 / n, total_top5 / n
+    return total_loss / n, total_top1 / n, total_top5 / n, total_confidence / n
 
 
 def train_classifier(
@@ -146,6 +149,7 @@ def train_classifier(
     auto_resume: bool = True,
     use_amp: bool = True,
     grad_clip_norm: float = 1.0,
+    early_stop_metric: str = "val_top1",
 ) -> Dict[str, List[float]]:
     device = _resolve_device(device)
     model = model.to(device)
@@ -173,6 +177,9 @@ def train_classifier(
         "val_top1": [],
         "train_top5": [],
         "val_top5": [],
+        "train_confidence": [],
+        "val_confidence": [],
+        "lr": [],
     }
 
     best_val_top1 = 0.0
@@ -217,7 +224,7 @@ def train_classifier(
             scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - epoch + 1, 1))
             backbone_unfrozen = True
 
-        train_loss, train_top1, train_top5 = _run_epoch(
+        train_loss, train_top1, train_top5, train_confidence = _run_epoch(
             model,
             train_loader,
             criterion,
@@ -228,7 +235,7 @@ def train_classifier(
             use_amp=amp_enabled,
             grad_clip_norm=grad_clip_norm,
         )
-        val_loss, val_top1, val_top5 = _run_epoch(
+        val_loss, val_top1, val_top5, val_confidence = _run_epoch(
             model,
             val_loader,
             criterion,
@@ -247,12 +254,17 @@ def train_classifier(
         history["val_top1"].append(val_top1)
         history["train_top5"].append(train_top5)
         history["val_top5"].append(val_top5)
+        history["train_confidence"].append(train_confidence)
+        history["val_confidence"].append(val_confidence)
+        history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
         print(
             f"Epoch {epoch:03d} | "
             f"loss={train_loss:.4f}/{val_loss:.4f} | "
             f"top1={train_top1:.4f}/{val_top1:.4f} | "
-            f"top5={train_top5:.4f}/{val_top5:.4f}"
+            f"top5={train_top5:.4f}/{val_top5:.4f} | "
+            f"conf={train_confidence:.4f}/{val_confidence:.4f} | "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
 
         if val_top1 > best_val_top1:
@@ -286,8 +298,8 @@ def train_classifier(
                 backbone_unfrozen,
             )
 
-        # Lower val loss is used for stopping criterion.
-        if early_stopper.step(val_loss):
+        stop_value = val_loss if early_stop_metric == "val_loss" else -val_top1
+        if early_stopper.step(stop_value):
             _save_checkpoint(
                 latest_checkpoint,
                 epoch,
