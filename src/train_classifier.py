@@ -90,6 +90,7 @@ def _run_epoch(
     scaler: GradScaler,
     use_amp: bool,
     grad_clip_norm: float,
+    mixup_alpha: float,
 ) -> Tuple[float, float, float]:
     if train:
         model.train()
@@ -106,13 +107,25 @@ def _run_epoch(
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
+        labels_for_metrics = labels
+        mixup_active = train and mixup_alpha > 0
+        if mixup_active:
+            lam = float(torch.distributions.Beta(mixup_alpha, mixup_alpha).sample().item())
+            index = torch.randperm(images.size(0), device=device)
+            images = lam * images + (1.0 - lam) * images[index]
+            labels_a = labels
+            labels_b = labels[index]
+
         if train:
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(train):
             with autocast("cuda", enabled=use_amp):
                 logits = model(images)
-                loss = criterion(logits, labels)
+                if mixup_active:
+                    loss = lam * criterion(logits, labels_a) + (1.0 - lam) * criterion(logits, labels_b)
+                else:
+                    loss = criterion(logits, labels)
             if train:
                 scaler.scale(loss).backward()
                 if grad_clip_norm is not None and grad_clip_norm > 0:
@@ -121,8 +134,8 @@ def _run_epoch(
                 scaler.step(optimizer)
                 scaler.update()
 
-        top1 = (logits.argmax(dim=1) == labels).float().mean().item()
-        top5 = topk_accuracy(logits, labels, k=5)
+        top1 = (logits.argmax(dim=1) == labels_for_metrics).float().mean().item()
+        top5 = topk_accuracy(logits, labels_for_metrics, k=5)
         confidence = torch.softmax(logits, dim=1).max(dim=1).values.mean().item()
 
         total_loss += float(loss.detach().cpu())
@@ -150,10 +163,13 @@ def train_classifier(
     use_amp: bool = True,
     grad_clip_norm: float = 1.0,
     early_stop_metric: str = "val_top1",
+    weight_decay: float = 1e-4,
+    label_smoothing: float = 0.1,
+    mixup_alpha: float = 0.2,
 ) -> Dict[str, List[float]]:
     device = _resolve_device(device)
     model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     amp_enabled = bool(use_amp and device.startswith("cuda"))
     scaler = GradScaler("cuda", enabled=amp_enabled)
 
@@ -166,7 +182,11 @@ def train_classifier(
     early_stopper = EarlyStopper(patience=patience)
 
     _set_backbone_frozen(model, frozen=True)
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     backbone_unfrozen = False
 
@@ -192,10 +212,14 @@ def train_classifier(
         backbone_unfrozen = bool(checkpoint.get("backbone_unfrozen", False))
         if backbone_unfrozen:
             _set_backbone_frozen(model, frozen=False)
-            optimizer = AdamW(model.parameters(), lr=learning_rate)
+            optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         else:
             _set_backbone_frozen(model, frozen=True)
-            optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=learning_rate)
+            optimizer = AdamW(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+            )
 
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         scheduler.load_state_dict(checkpoint["scheduler_state"])
@@ -220,7 +244,7 @@ def train_classifier(
     for epoch in range(start_epoch, epochs + 1):
         if (not backbone_unfrozen) and epoch == freeze_backbone_epochs + 1:
             _set_backbone_frozen(model, frozen=False)
-            optimizer = AdamW(model.parameters(), lr=learning_rate)
+            optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
             scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - epoch + 1, 1))
             backbone_unfrozen = True
 
@@ -234,6 +258,7 @@ def train_classifier(
             scaler=scaler,
             use_amp=amp_enabled,
             grad_clip_norm=grad_clip_norm,
+            mixup_alpha=mixup_alpha,
         )
         val_loss, val_top1, val_top5, val_confidence = _run_epoch(
             model,
@@ -245,6 +270,7 @@ def train_classifier(
             scaler=scaler,
             use_amp=amp_enabled,
             grad_clip_norm=grad_clip_norm,
+            mixup_alpha=0.0,
         )
         scheduler.step()
 

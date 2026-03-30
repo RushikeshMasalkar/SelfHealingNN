@@ -23,18 +23,33 @@ def normalize_imagenet(batch: torch.Tensor) -> torch.Tensor:
     return (batch - mean) / std
 
 
+def denormalize_imagenet(batch: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor(IMAGENET_MEAN, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
+    return torch.clamp(batch * std + mean, min=0.0, max=1.0)
+
+
+def _to_unit_range_image(image: torch.Tensor) -> np.ndarray:
+    if image.dim() != 3:
+        raise ValueError("Expected CHW image tensor")
+    img = image.detach()
+    if img.min().item() < -0.25 or img.max().item() > 1.25:
+        img = denormalize_imagenet(img.unsqueeze(0)).squeeze(0)
+    else:
+        img = torch.clamp(img, min=0.0, max=1.0)
+    return img.cpu().permute(1, 2, 0).numpy()
+
+
 def compute_psnr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
-    orig = original.detach().cpu().permute(1, 2, 0).numpy()
-    rec = reconstructed.detach().cpu().permute(1, 2, 0).numpy()
-    data_range = float(orig.max() - orig.min()) or 1.0
-    return float(peak_signal_noise_ratio(orig, rec, data_range=data_range))
+    orig = _to_unit_range_image(original)
+    rec = _to_unit_range_image(reconstructed)
+    return float(peak_signal_noise_ratio(orig, rec, data_range=1.0))
 
 
 def compute_ssim(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
-    orig = original.detach().cpu().permute(1, 2, 0).numpy()
-    rec = reconstructed.detach().cpu().permute(1, 2, 0).numpy()
-    data_range = float(orig.max() - orig.min()) or 1.0
-    return float(structural_similarity(orig, rec, channel_axis=2, data_range=data_range))
+    orig = _to_unit_range_image(original)
+    rec = _to_unit_range_image(reconstructed)
+    return float(structural_similarity(orig, rec, channel_axis=2, data_range=1.0))
 
 
 def _accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:

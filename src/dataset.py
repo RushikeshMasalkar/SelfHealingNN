@@ -14,6 +14,36 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
+def _normalize_imagenet(image: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor(IMAGENET_MEAN, device=image.device, dtype=image.dtype).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=image.device, dtype=image.dtype).view(3, 1, 1)
+    return (image - mean) / std
+
+
+def _denormalize_imagenet(image: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor(IMAGENET_MEAN, device=image.device, dtype=image.dtype).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=image.device, dtype=image.dtype).view(3, 1, 1)
+    return torch.clamp(image * std + mean, min=0.0, max=1.0)
+
+
+def _is_likely_normalized(image: torch.Tensor) -> bool:
+    return bool(image.min() < -0.25 or image.max() > 1.25)
+
+
+def _to_pixel_space(image: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    was_normalized = _is_likely_normalized(image)
+    if was_normalized:
+        return _denormalize_imagenet(image), True
+    return torch.clamp(image, min=0.0, max=1.0), False
+
+
+def _from_pixel_space(image: torch.Tensor, return_normalized: bool) -> torch.Tensor:
+    image = torch.clamp(image, min=0.0, max=1.0)
+    if return_normalized:
+        return _normalize_imagenet(image)
+    return image
+
+
 @dataclass
 class DatasetConfig:
     root: str = "./data/raw"
@@ -27,29 +57,33 @@ class NoiseInjector:
     """Applies synthetic corruption to image tensors."""
 
     def add_gaussian_noise(self, image: torch.Tensor, std: float = 0.3) -> torch.Tensor:
-        noise = torch.randn_like(image) * std
-        return torch.clamp(image + noise, min=-3.0, max=3.0)
+        image_px, was_normalized = _to_pixel_space(image)
+        noise = torch.randn_like(image_px) * std
+        out = image_px + noise
+        return _from_pixel_space(out, return_normalized=was_normalized)
 
     def add_salt_pepper(self, image: torch.Tensor, prob: float = 0.1) -> torch.Tensor:
-        out = image.clone()
+        image_px, was_normalized = _to_pixel_space(image)
+        out = image_px.clone()
         salt = torch.rand_like(out[0]) < (prob / 2.0)
         pepper = torch.rand_like(out[0]) < (prob / 2.0)
         ch = out.shape[0]
-        min_val = float(out.min())
-        max_val = float(out.max())
+        min_val = 0.0
+        max_val = 1.0
         for c in range(ch):
             out[c][salt] = max_val
             out[c][pepper] = min_val
-        return out
+        return _from_pixel_space(out, return_normalized=was_normalized)
 
     def add_occlusion(self, image: torch.Tensor, patch_size: int = 32) -> torch.Tensor:
-        out = image.clone()
+        image_px, was_normalized = _to_pixel_space(image)
+        out = image_px.clone()
         _, h, w = out.shape
         patch = min(patch_size, h, w)
         top = random.randint(0, h - patch)
         left = random.randint(0, w - patch)
         out[:, top : top + patch, left : left + patch] = 0.0
-        return out
+        return _from_pixel_space(out, return_normalized=was_normalized)
 
     def apply(self, image: torch.Tensor, noise_type: str, **kwargs) -> torch.Tensor:
         if noise_type == "gaussian":
