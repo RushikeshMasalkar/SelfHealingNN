@@ -39,6 +39,8 @@ class SelfHealingPipeline(nn.Module):
 
     @torch.no_grad()
     def classify(self, cleaned_image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # VAE now outputs normalized images directly; no re-normalization needed
+        # (unless explicitly configured otherwise via vae_outputs_denormalized flag)
         classifier_input = (
             normalize_imagenet(cleaned_image)
             if self.vae_outputs_denormalized

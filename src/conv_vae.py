@@ -52,7 +52,6 @@ class ConvDecoder(nn.Module):
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
             nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid(),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:

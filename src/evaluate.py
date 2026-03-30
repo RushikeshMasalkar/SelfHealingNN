@@ -102,14 +102,19 @@ def evaluate_pipeline(
                 healed_input = normalize_imagenet(recon) if vae_outputs_denormalized else recon
 
                 if debug_ranges:
+                    noisy_min, noisy_max = noisy_images.min().item(), noisy_images.max().item()
+                    recon_min, recon_max = recon.min().item(), recon.max().item()
+                    healed_min, healed_max = healed_input.min().item(), healed_input.max().item()
                     print(
                         "[EvalRanges] "
                         f"clean=[{images.min().item():.3f},{images.max().item():.3f}] "
-                        f"noisy=[{noisy_images.min().item():.3f},{noisy_images.max().item():.3f}] "
-                        f"recon=[{recon.min().item():.3f},{recon.max().item():.3f}] "
-                        f"healed_input=[{healed_input.min().item():.3f},{healed_input.max().item():.3f}]"
+                        f"noisy=[{noisy_min:.3f},{noisy_max:.3f}] "
+                        f"recon=[{recon_min:.3f},{recon_max:.3f}] "
+                        f"healed_input=[{healed_min:.3f},{healed_max:.3f}]"
                     )
-                    debug_ranges = False
+                    # Check if recon looks like Sigmoid output
+                    if recon_max <= 1.2 and recon_min >= -0.2:
+                        print("[EvalWarn] Reconstruction appears to be in [0,1] range (Sigmoid pattern). May indicate training issue.")
 
                 healed_logits = classifier(healed_input)
                 healed_acc.append(_accuracy_from_logits(healed_logits, labels))
@@ -129,6 +134,24 @@ def evaluate_pipeline(
                     "noHealing_conf": float(np.mean(noisy_conf)),
                     "withHealing_conf": float(np.mean(healed_conf)),
                 }
+            )
+
+    # Validation: warn if healing is making things worse
+    if results:
+        last_result = results[-1]
+        if last_result["withHealing"] <= last_result["noHealing"]:
+            print(
+                f"[EvalWarn] At high noise ({last_result['noise']}): "
+                f"Healing accuracy ({last_result['withHealing']:.2f}%) <= "
+                f"No-healing accuracy ({last_result['noHealing']:.2f}%). "
+                f"VAE is not improving classifier performance. Check tensor ranges and VAE training config."
+            )
+        if last_result["withHealing_conf"] < last_result["noHealing_conf"] * 0.95:
+            print(
+                f"[EvalWarn] At high noise ({last_result['noise']}): "
+                f"Healing confidence ({last_result['withHealing_conf']:.4f}) much lower than "
+                f"no-healing confidence ({last_result['noHealing_conf']:.4f}). "
+                f"VAE outputs may be in wrong tensor space."
             )
 
     return results

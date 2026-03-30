@@ -96,6 +96,47 @@ def _batch_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
     return float(10.0 * torch.log10(torch.tensor(1.0 / mse_value)).item())
 
 
+def _validate_tensor_ranges(
+    noisy_batch: torch.Tensor,
+    target_batch: torch.Tensor,
+    recon_batch: torch.Tensor,
+    epoch: int,
+    denormalize_targets: bool,
+) -> None:
+    """Validate that tensors are in the correct normalized space [-3, +3]."""
+    noisy_min, noisy_max = float(noisy_batch.min()), float(noisy_batch.max())
+    target_min, target_max = float(target_batch.min()), float(target_batch.max())
+    recon_min, recon_max = float(recon_batch.min()), float(recon_batch.max())
+    
+    # Check if outputs are stuck in [0, 1] (Sigmoid pattern - bad sign)
+    in_sigmoid_range = recon_max <= 1.2 and recon_min >= -0.2
+    if in_sigmoid_range:
+        print(
+            f"[VAE-WARN] Epoch {epoch}: Reconstruction looks like Sigmoid output [0,1]. "
+            f"This suggests training is learning denormalization, not denoising. "
+            f"Range: [{recon_min:.3f}, {recon_max:.3f}]"
+        )
+    
+    # Expected ranges
+    if denormalize_targets:
+        expected_target_max = 1.1  # Denormalized should be [0, 1]
+    else:
+        expected_target_max = 3.5  # Normalized should be roughly [-3, +3]
+    
+    # Warning if ranges don't match expectations
+    if target_max > expected_target_max and not denormalize_targets:
+        pass  # OK for normalized
+    elif target_max <= 1.2 and denormalize_targets:
+        pass  # OK for denormalized
+    
+    # Sanity check: reconstruction should be in same space as target
+    if not (recon_min > -4 and recon_max < 4):
+        print(
+            f"[VAE-WARN] Epoch {epoch}: Reconstruction out of expected range [-4, +4]. "
+            f"Range: [{recon_min:.3f}, {recon_max:.3f}]. Target range: [{target_min:.3f}, {target_max:.3f}]"
+        )
+
+
 def train_vae(
     model: ConvVAE,
     train_loader,
@@ -202,6 +243,7 @@ def train_vae(
         train_psnr = 0.0
         train_valid_batches = 0
         saw_non_finite = False
+        validated_ranges_this_epoch = False
 
         train_bar = tqdm(train_loader, desc=f"[VAE][Train] Epoch {epoch}/{epochs}", leave=False)
         for noisy, clean, _ in train_bar:
@@ -212,6 +254,12 @@ def train_vae(
             optimizer.zero_grad(set_to_none=True)
             with autocast("cuda", enabled=amp_enabled):
                 recon, mu, logvar = model(noisy)
+                
+                # Validate tensor ranges on first batch of epoch
+                if not validated_ranges_this_epoch:
+                    _validate_tensor_ranges(noisy, target_clean, recon, epoch, denormalize_targets)
+                    validated_ranges_this_epoch = True
+                
                 loss, parts = vae_loss(
                     recon,
                     target_clean,
