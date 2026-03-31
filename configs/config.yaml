@@ -1,54 +1,38 @@
-# Dataset
 dataset:
-  name: imagenet100
+  name: cifar100
   root: ./data/raw/
-  image_size: 224
+  image_size: 32
   num_classes: 100
-  train_split: 0.8
+  mean: [0.5071, 0.4867, 0.4408]
+  std: [0.2675, 0.2565, 0.2761]
+  train_split: 0.9
 
-# Noise
 noise:
   types: [gaussian, salt_pepper, occlusion]
-  gaussian_std: 0.2
-  salt_pepper_prob: 0.1
-  occlusion_size: 32
+  gaussian_std: 0.3
+  salt_pepper_prob: 0.05
+  occlusion_size: 8
 
-# ConvVAE
 vae:
   latent_dim: 256
-  encoder_channels: [64, 128, 256, 512]
-  beta: 0.2
-  learning_rate: 0.0001
-  epochs: 50
-  batch_size: 16
-  denormalize_targets: false
-  disable_amp_until_stable: true
-  beta_schedule: linear_warmup
-  beta_warmup_epochs: 10
-  recon_loss_type: smooth_l1
-  huber_delta: 1.0
+  encoder_channels: [32, 64, 128, 256]
+  beta: 0.5
+  learning_rate: 0.001
+  epochs: 100
+  batch_size: 64
+  patience: 10
 
-# ResNet Classifier
 classifier:
   backbone: resnet18
   pretrained: true
-  learning_rate: 0.0001
-  weight_decay: 0.0001
-  label_smoothing: 0.1
-  mixup_alpha: 0.2
-  freeze_backbone_epochs: 3
-  epochs: 30
-  batch_size: 32
+  learning_rate: 0.0005
+  epochs: 50
+  batch_size: 64
+  patience: 7
+  dropout: 0.3
 
-# Training
 training:
-  device: cuda
-  num_workers: 6
+  device: cpu
+  num_workers: 0
   save_every: 5
-  early_stopping_patience: 10
-  checkpoint_interval: 2
-  auto_resume: true
-  amp: true
-  grad_clip_norm: 1.0
-  vae_early_stop_metric: val_recon
-  classifier_early_stop_metric: val_top1
+  seed: 42

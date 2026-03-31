@@ -1,361 +1,288 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
-from torch.nn.utils import clip_grad_norm_
+import yaml
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
-from .classifier import SelfHealingClassifier
+from .classifier import CIFAR100Classifier, get_classifier
+from .conv_vae import ConvVAE
+from .dataset import get_dataloaders
 
 
-class EarlyStopper:
-    def __init__(self, patience: int = 7):
-        self.patience = patience
-        self.best = float("inf")
-        self.counter = 0
-
-    def step(self, value: float) -> bool:
-        if value < self.best:
-            self.best = value
-            self.counter = 0
-            return False
-        self.counter += 1
-        return self.counter >= self.patience
+def load_config(config_path: str = "configs/config.yaml") -> Dict:
+    with open(config_path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
 
 
-def _resolve_device(device: str) -> str:
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        print("[Classifier] CUDA requested but unavailable. Falling back to CPU.")
-        return "cpu"
-    return device
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
-def _save_checkpoint(
-    checkpoint_path: Path,
-    epoch: int,
-    model: SelfHealingClassifier,
-    optimizer,
-    scheduler,
-    scaler: GradScaler,
-    history: Dict[str, List[float]],
-    best_val_top1: float,
-    early_stopper: EarlyStopper,
-    backbone_unfrozen: bool,
-) -> None:
-    payload = {
-        "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(),
-        "scaler_state": scaler.state_dict() if scaler.is_enabled() else None,
-        "history": history,
-        "best_val_top1": best_val_top1,
-        "backbone_unfrozen": backbone_unfrozen,
-        "early_stopper": {
-            "best": early_stopper.best,
-            "counter": early_stopper.counter,
-            "patience": early_stopper.patience,
-        },
-    }
-    torch.save(payload, checkpoint_path)
+def denormalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) -> torch.Tensor:
+    mean_t = torch.tensor(mean, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    std_t = torch.tensor(std, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    return torch.clamp(batch * std_t + mean_t, 0.0, 1.0)
 
 
-def topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, k: int = 5) -> float:
-    _, pred = logits.topk(k, dim=1)
-    correct = pred.eq(targets.view(-1, 1)).sum().item()
-    return correct / targets.size(0)
+def normalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) -> torch.Tensor:
+    mean_t = torch.tensor(mean, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    std_t = torch.tensor(std, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    return (batch - mean_t) / std_t
 
 
-def _set_backbone_frozen(model: SelfHealingClassifier, frozen: bool) -> None:
-    for name, param in model.backbone.named_parameters():
-        if name.startswith("fc."):
-            param.requires_grad = True
-        else:
-            param.requires_grad = not frozen
+def top5_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    top5 = logits.topk(5, dim=1).indices
+    correct = top5.eq(labels.view(-1, 1)).any(dim=1)
+    return float(correct.float().mean().item())
 
 
-def _run_epoch(
-    model: SelfHealingClassifier,
+def run_classifier_epoch(
+    classifier: CIFAR100Classifier,
+    vae: ConvVAE,
     loader,
     criterion,
     optimizer,
-    device: str,
+    device: torch.device,
+    mean: List[float],
+    std: List[float],
     train: bool,
-    scaler: GradScaler,
-    use_amp: bool,
-    grad_clip_norm: float,
-    mixup_alpha: float,
+    phase_label: str,
 ) -> Tuple[float, float, float]:
     if train:
-        model.train()
+        classifier.train()
     else:
-        model.eval()
+        classifier.eval()
 
     total_loss = 0.0
     total_top1 = 0.0
     total_top5 = 0.0
-    total_confidence = 0.0
+    batch_count = 0
 
-    iterator = tqdm(loader, desc="Train" if train else "Val", leave=False)
-    for images, labels in iterator:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    loop = tqdm(loader, desc=phase_label, leave=False)
+    for noisy, _, labels in loop:
+        noisy = noisy.to(device)
+        labels = labels.to(device)
 
-        labels_for_metrics = labels
-        mixup_active = train and mixup_alpha > 0
-        if mixup_active:
-            lam = float(torch.distributions.Beta(mixup_alpha, mixup_alpha).sample().item())
-            index = torch.randperm(images.size(0), device=device)
-            images = lam * images + (1.0 - lam) * images[index]
-            labels_a = labels
-            labels_b = labels[index]
+        with torch.no_grad():
+            noisy_pixel = denormalize_batch(noisy, mean, std)
+            cleaned_pixel, _, _ = vae(noisy_pixel)
+            cleaned = normalize_batch(cleaned_pixel, mean, std)
 
         if train:
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(train):
-            with autocast("cuda", enabled=use_amp):
-                logits = model(images)
-                if mixup_active:
-                    loss = lam * criterion(logits, labels_a) + (1.0 - lam) * criterion(logits, labels_b)
-                else:
-                    loss = criterion(logits, labels)
+            logits = classifier(cleaned)
+            loss = criterion(logits, labels)
             if train:
-                scaler.scale(loss).backward()
-                if grad_clip_norm is not None and grad_clip_norm > 0:
-                    scaler.unscale_(optimizer)
-                    clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                loss.backward()
+                optimizer.step()
 
-        top1 = (logits.argmax(dim=1) == labels_for_metrics).float().mean().item()
-        top5 = topk_accuracy(logits, labels_for_metrics, k=5)
-        confidence = torch.softmax(logits, dim=1).max(dim=1).values.mean().item()
+        total_loss += float(loss.item())
+        total_top1 += float((logits.argmax(dim=1) == labels).float().mean().item())
+        total_top5 += top5_accuracy(logits, labels)
+        batch_count += 1
 
-        total_loss += float(loss.detach().cpu())
-        total_top1 += top1
-        total_top5 += top5
-        total_confidence += confidence
-
-    n = max(len(loader), 1)
-    return total_loss / n, total_top1 / n, total_top5 / n, total_confidence / n
+    batch_count = max(batch_count, 1)
+    return total_loss / batch_count, total_top1 / batch_count, total_top5 / batch_count
 
 
-def train_classifier(
-    model: SelfHealingClassifier,
-    train_loader,
-    val_loader,
-    device: str = "cuda",
-    epochs: int = 30,
-    learning_rate: float = 1e-4,
-    freeze_backbone_epochs: int = 5,
-    save_path: str = "models/resnet_classifier.pth",
-    patience: int = 7,
-    checkpoint_dir: str = "models/checkpoints/classifier",
-    checkpoint_interval: int = 2,
-    auto_resume: bool = True,
-    use_amp: bool = True,
-    grad_clip_norm: float = 1.0,
-    early_stop_metric: str = "val_top1",
-    weight_decay: float = 1e-4,
-    label_smoothing: float = 0.1,
-    mixup_alpha: float = 0.2,
-) -> Dict[str, List[float]]:
-    device = _resolve_device(device)
-    model = model.to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    amp_enabled = bool(use_amp and device.startswith("cuda"))
-    scaler = GradScaler("cuda", enabled=amp_enabled)
+def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
+    config = load_config(config_path)
 
-    checkpoint_root = Path(checkpoint_dir)
-    checkpoint_root.mkdir(parents=True, exist_ok=True)
-    latest_checkpoint = checkpoint_root / "latest.pt"
-    save_target = Path(save_path)
-    save_target.parent.mkdir(parents=True, exist_ok=True)
+    seed = int(config.get("training", {}).get("seed", 42))
+    set_seed(seed)
 
-    early_stopper = EarlyStopper(patience=patience)
+    device = torch.device("cpu")
+    dataset_cfg = config.get("dataset", {})
+    classifier_cfg = config.get("classifier", {})
 
-    _set_backbone_frozen(model, frozen=True)
-    optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=learning_rate,
-        weight_decay=weight_decay,
-    )
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-    backbone_unfrozen = False
+    mean = dataset_cfg.get("mean", [0.5071, 0.4867, 0.4408])
+    std = dataset_cfg.get("std", [0.2675, 0.2565, 0.2761])
 
-    history = {
-        "train_loss": [],
-        "val_loss": [],
-        "train_top1": [],
-        "val_top1": [],
-        "train_top5": [],
-        "val_top5": [],
-        "train_confidence": [],
-        "val_confidence": [],
-        "lr": [],
-    }
+    train_loader, val_loader, _ = get_dataloaders(config)
 
-    best_val_top1 = 0.0
-    start_epoch = 1
+    vae = ConvVAE(latent_dim=int(config.get("vae", {}).get("latent_dim", 256))).to(device)
+    vae.load_state_dict(torch.load("models/conv_vae_best.pth", map_location=device))
+    vae.eval()
+    for param in vae.parameters():
+        param.requires_grad = False
 
-    if auto_resume and latest_checkpoint.exists():
-        checkpoint = torch.load(latest_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint["model_state"])
+    classifier = get_classifier(config).to(device)
+    criterion = nn.CrossEntropyLoss()
 
-        backbone_unfrozen = bool(checkpoint.get("backbone_unfrozen", False))
-        if backbone_unfrozen:
-            _set_backbone_frozen(model, frozen=False)
-            optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        else:
-            _set_backbone_frozen(model, frozen=True)
-            optimizer = AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=learning_rate,
-                weight_decay=weight_decay,
-            )
+    models_dir = Path("models")
+    results_dir = Path("outputs/results")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-        optimizer.load_state_dict(checkpoint["optimizer_state"])
-        scheduler.load_state_dict(checkpoint["scheduler_state"])
-        if checkpoint.get("scaler_state") is not None and scaler.is_enabled():
-            scaler.load_state_dict(checkpoint["scaler_state"])
+    history_rows: List[Dict[str, float]] = []
+    best_val_acc = 0.0
+    best_path = models_dir / "resnet_classifier.pth"
 
-        loaded_history = checkpoint.get("history", {})
-        for key in history:
-            history[key] = list(loaded_history.get(key, []))
+    patience = int(classifier_cfg.get("patience", 7))
+    patience_counter = 0
+    global_epoch = 0
 
-        best_val_top1 = float(checkpoint.get("best_val_top1", 0.0))
-        early = checkpoint.get("early_stopper", {})
-        early_stopper.best = float(early.get("best", early_stopper.best))
-        early_stopper.counter = int(early.get("counter", early_stopper.counter))
-        start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        print(f"[Classifier] Resuming from epoch {start_epoch} (latest checkpoint).")
+    # Phase 1: frozen backbone.
+    classifier.freeze_backbone()
+    optimizer = AdamW(filter(lambda p: p.requires_grad, classifier.parameters()), lr=1e-3, weight_decay=1e-4)
 
-    if start_epoch > epochs:
-        print("[Classifier] Training already completed for configured epochs. Returning loaded history.")
-        return history
-
-    for epoch in range(start_epoch, epochs + 1):
-        if (not backbone_unfrozen) and epoch == freeze_backbone_epochs + 1:
-            _set_backbone_frozen(model, frozen=False)
-            optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-            scheduler = CosineAnnealingLR(optimizer, T_max=max(epochs - epoch + 1, 1))
-            backbone_unfrozen = True
-
-        train_loss, train_top1, train_top5, train_confidence = _run_epoch(
-            model,
+    for epoch in range(1, 11):
+        global_epoch += 1
+        train_loss, train_acc, train_top5 = run_classifier_epoch(
+            classifier,
+            vae,
             train_loader,
             criterion,
             optimizer,
             device,
+            mean,
+            std,
             train=True,
-            scaler=scaler,
-            use_amp=amp_enabled,
-            grad_clip_norm=grad_clip_norm,
-            mixup_alpha=mixup_alpha,
+            phase_label=f"Phase 1 Train {epoch}/10",
         )
-        val_loss, val_top1, val_top5, val_confidence = _run_epoch(
-            model,
-            val_loader,
-            criterion,
-            optimizer,
-            device,
-            train=False,
-            scaler=scaler,
-            use_amp=amp_enabled,
-            grad_clip_norm=grad_clip_norm,
-            mixup_alpha=0.0,
-        )
-        scheduler.step()
+        with torch.no_grad():
+            val_loss, val_acc, val_top5 = run_classifier_epoch(
+                classifier,
+                vae,
+                val_loader,
+                criterion,
+                optimizer,
+                device,
+                mean,
+                std,
+                train=False,
+                phase_label=f"Phase 1 Val {epoch}/10",
+            )
 
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["train_top1"].append(train_top1)
-        history["val_top1"].append(val_top1)
-        history["train_top5"].append(train_top5)
-        history["val_top5"].append(val_top5)
-        history["train_confidence"].append(train_confidence)
-        history["val_confidence"].append(val_confidence)
-        history["lr"].append(float(optimizer.param_groups[0]["lr"]))
-
+        lr = float(optimizer.param_groups[0]["lr"])
         print(
-            f"Epoch {epoch:03d} | "
-            f"loss={train_loss:.4f}/{val_loss:.4f} | "
-            f"top1={train_top1:.4f}/{val_top1:.4f} | "
-            f"top5={train_top5:.4f}/{val_top5:.4f} | "
-            f"conf={train_confidence:.4f}/{val_confidence:.4f} | "
-            f"lr={optimizer.param_groups[0]['lr']:.2e}"
+            f"Phase 1 | Epoch {epoch}/10 | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
         )
 
-        if val_top1 > best_val_top1:
-            best_val_top1 = val_top1
-            torch.save(model.state_dict(), save_target)
+        history_rows.append(
+            {
+                "epoch": global_epoch,
+                "phase": 1,
+                "phase_epoch": epoch,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "train_top5_acc": train_top5,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "val_top5_acc": val_top5,
+                "lr": lr,
+            }
+        )
 
-        if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
-            epoch_checkpoint = checkpoint_root / f"epoch_{epoch:04d}.pt"
-            _save_checkpoint(
-                epoch_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val_top1,
-                early_stopper,
-                backbone_unfrozen,
-            )
-            _save_checkpoint(
-                latest_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val_top1,
-                early_stopper,
-                backbone_unfrozen,
-            )
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            patience_counter = 0
+            torch.save(classifier.state_dict(), best_path)
+        else:
+            patience_counter += 1
 
-        stop_value = val_loss if early_stop_metric == "val_loss" else -val_top1
-        if early_stopper.step(stop_value):
-            _save_checkpoint(
-                latest_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val_top1,
-                early_stopper,
-                backbone_unfrozen,
-            )
-            print(f"Early stopping triggered at epoch {epoch}.")
+        if patience_counter >= patience:
+            print(f"Early stopping triggered in Phase 1 at epoch {epoch}.")
             break
 
-        if device.startswith("cuda"):
-            torch.cuda.empty_cache()
+    # Phase 2: full fine-tuning.
+    if patience_counter < patience:
+        classifier.unfreeze_backbone()
+        optimizer = AdamW(classifier.parameters(), lr=1e-4, weight_decay=1e-4)
+        scheduler = CosineAnnealingLR(optimizer, T_max=40)
 
-    if checkpoint_interval <= 0:
-        _save_checkpoint(
-            latest_checkpoint,
-            epochs,
-            model,
-            optimizer,
-            scheduler,
-            scaler,
-            history,
-            best_val_top1,
-            early_stopper,
-            backbone_unfrozen,
-        )
+        for epoch in range(1, 41):
+            global_epoch += 1
+            train_loss, train_acc, train_top5 = run_classifier_epoch(
+                classifier,
+                vae,
+                train_loader,
+                criterion,
+                optimizer,
+                device,
+                mean,
+                std,
+                train=True,
+                phase_label=f"Phase 2 Train {epoch}/40",
+            )
+            with torch.no_grad():
+                val_loss, val_acc, val_top5 = run_classifier_epoch(
+                    classifier,
+                    vae,
+                    val_loader,
+                    criterion,
+                    optimizer,
+                    device,
+                    mean,
+                    std,
+                    train=False,
+                    phase_label=f"Phase 2 Val {epoch}/40",
+                )
 
-    return history
+            lr = float(optimizer.param_groups[0]["lr"])
+            scheduler.step()
+
+            print(
+                f"Phase 2 | Epoch {epoch}/40 | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
+            )
+
+            history_rows.append(
+                {
+                    "epoch": global_epoch,
+                    "phase": 2,
+                    "phase_epoch": epoch,
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "train_top5_acc": train_top5,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "val_top5_acc": val_top5,
+                    "lr": lr,
+                }
+            )
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                torch.save(classifier.state_dict(), best_path)
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping triggered in Phase 2 at epoch {epoch}.")
+                break
+
+    pd.DataFrame(history_rows).to_csv(results_dir / "classifier_history.csv", index=False)
+    print(f"Best validation accuracy: {best_val_acc * 100:.2f}%")
+    print("Model saved: models/resnet_classifier.pth")
+
+    return {
+        "train_loss": [row["train_loss"] for row in history_rows],
+        "val_loss": [row["val_loss"] for row in history_rows],
+        "train_acc": [row["train_acc"] for row in history_rows],
+        "val_acc": [row["val_acc"] for row in history_rows],
+        "val_top5_acc": [row["val_top5_acc"] for row in history_rows],
+    }
+
+
+def train_classifier(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
+    return train_classifier_model(config_path=config_path)
+
+
+if __name__ == "__main__":
+    train_classifier_model()

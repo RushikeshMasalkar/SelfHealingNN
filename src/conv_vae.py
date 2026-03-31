@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -8,10 +8,13 @@ import torch.nn.functional as F
 
 
 class ConvEncoder(nn.Module):
-    def __init__(self, latent_dim: int = 512):
+    def __init__(self, latent_dim: int = 256):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
@@ -20,59 +23,59 @@ class ConvEncoder(nn.Module):
             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True),
         )
         self.flatten = nn.Flatten()
-        self.feature_dim = 512 * 14 * 14
-        self.fc_mu = nn.Linear(self.feature_dim, latent_dim)
-        self.fc_logvar = nn.Linear(self.feature_dim, latent_dim)
+        self.fc = nn.Linear(256 * 4 * 4, 1024)
+        self.fc_mu = nn.Linear(1024, latent_dim)
+        self.fc_logvar = nn.Linear(1024, latent_dim)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.features(x)
-        h = self.flatten(h)
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
+        x = self.features(x)
+        x = self.flatten(x)
+        x = F.relu(self.fc(x), inplace=True)
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
         return mu, logvar
 
 
 class ConvDecoder(nn.Module):
-    def __init__(self, latent_dim: int = 512):
+    def __init__(self, latent_dim: int = 256):
         super().__init__()
-        self.fc = nn.Linear(latent_dim, 512 * 14 * 14)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2, inplace=True),
+        self.fc1 = nn.Linear(latent_dim, 1024)
+        self.fc2 = nn.Linear(1024, 256 * 4 * 4)
+        self.deconv = nn.Sequential(
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.ReLU(inplace=True),
             nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 3, kernel_size=3, stride=1, padding=1),
+            nn.Sigmoid(),
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc(z)
-        h = h.view(z.size(0), 512, 14, 14)
-        return self.decoder(h)
+        z = F.relu(self.fc1(z), inplace=True)
+        z = F.relu(self.fc2(z), inplace=True)
+        z = z.view(z.size(0), 256, 4, 4)
+        return self.deconv(z)
 
 
 class ConvVAE(nn.Module):
-    def __init__(self, latent_dim: int = 512):
+    def __init__(self, latent_dim: int = 256):
         super().__init__()
         self.encoder = ConvEncoder(latent_dim=latent_dim)
         self.decoder = ConvDecoder(latent_dim=latent_dim)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encoder(x)
         z = self.reparameterize(mu, logvar)
         recon = self.decoder(z)
@@ -80,32 +83,27 @@ class ConvVAE(nn.Module):
 
 
 def vae_loss(
-    recon_x: torch.Tensor,
-    x: torch.Tensor,
+    recon: torch.Tensor,
+    target: torch.Tensor,
     mu: torch.Tensor,
     logvar: torch.Tensor,
     beta: float = 0.5,
-    recon_loss_type: str = "smooth_l1",
-    huber_delta: float = 1.0,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    if recon_loss_type == "mse":
-        recon_loss = F.mse_loss(recon_x, x, reduction="mean")
-    elif recon_loss_type == "smooth_l1":
-        recon_loss = F.smooth_l1_loss(recon_x, x, reduction="mean")
-    elif recon_loss_type == "huber":
-        recon_loss = F.huber_loss(recon_x, x, reduction="mean", delta=huber_delta)
-    else:
-        raise ValueError(
-            f"Unsupported recon_loss_type='{recon_loss_type}'. "
-            "Expected one of: mse, smooth_l1, huber."
-        )
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    recon_loss = F.mse_loss(recon, target, reduction="sum")
+    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    total = recon_loss + beta * kl_loss
+    return total, recon_loss, kl_loss
 
-    stable_logvar = torch.clamp(logvar, min=-10.0, max=10.0)
-    kl = -0.5 * torch.mean(1 + stable_logvar - mu.pow(2) - stable_logvar.exp())
-    total = recon_loss + beta * kl
-    return total, {
-        "recon_loss": float(recon_loss.detach().cpu()),
-        "kl_loss": float(kl.detach().cpu()),
-        "total_loss": float(total.detach().cpu()),
-        "recon_loss_type": recon_loss_type,
-    }
+
+def print_model_summary(vae: ConvVAE) -> None:
+    encoder_params = sum(p.numel() for p in vae.encoder.parameters())
+    decoder_params = sum(p.numel() for p in vae.decoder.parameters())
+    total_params = encoder_params + decoder_params
+
+    print("=" * 60)
+    print("ConvVAE Model Summary")
+    print("=" * 60)
+    print(f"Encoder parameters : {encoder_params:,}")
+    print(f"Decoder parameters : {decoder_params:,}")
+    print(f"Total parameters   : {total_params:,}")
+    print("=" * 60)

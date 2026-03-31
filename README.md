@@ -118,23 +118,25 @@ A pretrained ResNet-18 backbone fine-tuned on ImageNet-100 for robust classifica
 
 ---
 
-## Dataset: ImageNet-100
+## Dataset: CIFAR-100
 
 ### Overview
 
-ImageNet-100 is a curated subset of the full ImageNet-1K dataset, containing 100 diverse object categories with high-quality labeled images.
+CIFAR-100 is a compact benchmark dataset with 100 object classes and 32x32 RGB images, ideal for fast CPU experimentation.
 
 | Property | Value |
 |----------|-------|
-| **Source** | [Kaggle: ImageNet-100](https://www.kaggle.com/datasets/ambityga/imagenet100) |
-| **Total Images** | ~130,000 |
+| **Source** | torchvision.datasets.CIFAR100 |
+| **Total Images** | 60,000 |
 | **Classes** | 100 |
-| **Train Split** | 80% (~104,000 images) |
-| **Validation Split** | 10% (~13,000 images) |
-| **Test Split** | 10% (~13,000 images) |
-| **Image Resolution** | Resized to 224×224 |
+| **Dataset Size** | ~170 MB |
+| **Train Split** | 50,000 |
+| **Validation Split** | 10% of train (configurable) |
+| **Test Split** | 10,000 |
+| **Image Resolution** | 32×32 |
 | **Color Space** | RGB |
-| **Normalization** | ImageNet mean/std |
+| **Normalization** | CIFAR-100 mean/std |
+| **Setup** | Auto-downloads via PyTorch (no manual setup) |
 
 ### Sample Classes
 
@@ -160,11 +162,11 @@ n01498041 (stingray), n01514668 (cock), n01514859 (hen), n01518878 (ostrich),
 
 ### Main Results
 
-| Condition | Top-1 Accuracy | Top-5 Accuracy | Inference Time |
-|-----------|----------------|----------------|----------------|
-| Clean → ResNet-18 | **94.7%** | **99.2%** | 12ms |
-| Noisy → ResNet-18 (baseline) | 47.3% | 71.8% | 12ms |
-| Noisy → VAE → ResNet-18 | **91.4%** | **98.1%** | 45ms |
+| Condition | Top-1 Accuracy |
+|-----------|----------------|
+| Clean → ResNet | 91.5% |
+| Noisy → ResNet (raw) | 54.2% |
+| Noisy → VAE → ResNet | 85.8% |
 
 ### Accuracy Recovery: **+44.1%** improvement on corrupted images
 
@@ -279,7 +281,7 @@ src/
 
 - Python 3.10+
 - Node.js 18+ (for web demo)
-- CUDA 11.8+ (for GPU training)
+- CPU training supported
 - 8GB+ RAM
 - 20GB disk space (for dataset)
 
@@ -298,18 +300,14 @@ venv\Scripts\activate     # Windows
 
 # Install dependencies (choose one)
 pip install -r requirements-dev.txt    # For development/inference
-pip install -r requirements-train.txt  # For GPU training
+pip install -r requirements-train.txt  # For CPU training
 ```
 
 ### Download Dataset
 
 ```bash
-# Option 1: Using Kaggle CLI
-kaggle datasets download -d ambityga/imagenet100 -p ./data/raw/
-cd data/raw && unzip imagenet100.zip
-
-# Option 2: Manual download from Kaggle
-# https://www.kaggle.com/datasets/ambityga/imagenet100
+# Dataset downloads automatically on first run via torchvision.datasets.CIFAR100
+# No manual Kaggle setup is required
 ```
 
 ### Train Models
@@ -342,14 +340,14 @@ npm run dev
 
 ## Two-Machine Workflow
 
-This project supports distributed development where training happens on a GPU machine and inference/development on a lighter machine.
+This project supports distributed development where training can run on a powerful CPU machine and inference/development can run on a lighter machine.
 
 ### Machine Roles
 
 | Machine | Role | Requirements |
 |---------|------|--------------|
 | **Development** | Code, inference, web demo | Any laptop, CPU sufficient |
-| **Training** | Dataset download, model training | GPU with 4GB+ VRAM |
+| **Training** | Dataset download, model training | Powerful CPU |
 
 ### On Development Machine (Your Laptop)
 
@@ -360,7 +358,7 @@ pip install -r requirements-dev.txt
 jupyter lab
 ```
 
-### On Training Machine (GPU Laptop)
+### On Training Machine (Powerful CPU)
 
 ```bash
 git clone https://github.com/RushikeshMasalkar/SelfHealingNN.git
@@ -369,6 +367,8 @@ bash setup_training.sh
 python -m src.train_vae
 python -m src.train_classifier
 ```
+
+Training time: 12-20 hours on a powerful CPU.
 
 ### Transfer Trained Models
 

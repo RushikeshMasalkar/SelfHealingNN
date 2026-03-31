@@ -1,440 +1,219 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
+import numpy as np
+import pandas as pd
 import torch
-import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
+import yaml
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
-from .conv_vae import ConvVAE, vae_loss
+from .conv_vae import ConvVAE, print_model_summary, vae_loss
+from .dataset import get_dataloaders
 
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
+def load_config(config_path: str = "configs/config.yaml") -> Dict:
+    with open(config_path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
 
 
-class EarlyStopper:
-    def __init__(self, patience: int = 7):
-        self.patience = patience
-        self.best = float("inf")
-        self.counter = 0
-
-    def step(self, value: float) -> bool:
-        if value < self.best:
-            self.best = value
-            self.counter = 0
-            return False
-        self.counter += 1
-        return self.counter >= self.patience
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
-def _resolve_device(device: str) -> str:
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        print("[VAE] CUDA requested but unavailable. Falling back to CPU.")
-        return "cpu"
-    return device
+def denormalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) -> torch.Tensor:
+    mean_t = torch.tensor(mean, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    std_t = torch.tensor(std, dtype=batch.dtype, device=batch.device).view(1, 3, 1, 1)
+    return torch.clamp(batch * std_t + mean_t, 0.0, 1.0)
 
 
-def _save_checkpoint(
-    checkpoint_path: Path,
-    epoch: int,
-    model: ConvVAE,
+def run_epoch(
+    vae: ConvVAE,
+    loader,
     optimizer,
-    scheduler,
-    scaler: GradScaler,
-    history: Dict[str, List[float]],
-    best_val: float,
-    early_stopper: EarlyStopper,
-) -> None:
-    payload = {
-        "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict(),
-        "scaler_state": scaler.state_dict() if scaler.is_enabled() else None,
-        "history": history,
-        "best_val": best_val,
-        "early_stopper": {
-            "best": early_stopper.best,
-            "counter": early_stopper.counter,
-            "patience": early_stopper.patience,
-        },
-    }
-    torch.save(payload, checkpoint_path)
-
-
-def _state_dict_is_finite(state_dict: Dict[str, torch.Tensor]) -> bool:
-    for value in state_dict.values():
-        if torch.is_tensor(value) and not torch.isfinite(value).all():
-            return False
-    return True
-
-
-def _denormalize_imagenet(batch: torch.Tensor) -> torch.Tensor:
-    mean = torch.tensor(IMAGENET_MEAN, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
-    std = torch.tensor(IMAGENET_STD, device=batch.device, dtype=batch.dtype).view(1, 3, 1, 1)
-    return torch.clamp(batch * std + mean, min=0.0, max=1.0)
-
-
-def _epoch_from_checkpoint_path(path: Path) -> int:
-    try:
-        return int(path.stem.split("_")[-1])
-    except ValueError:
-        return -1
-
-
-def _batch_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
-    mse = F.mse_loss(pred, target, reduction="mean")
-    mse_value = float(mse.detach().cpu())
-    if mse_value <= 1e-12:
-        return 99.0
-    return float(10.0 * torch.log10(torch.tensor(1.0 / mse_value)).item())
-
-
-def _validate_tensor_ranges(
-    noisy_batch: torch.Tensor,
-    target_batch: torch.Tensor,
-    recon_batch: torch.Tensor,
-    epoch: int,
-    denormalize_targets: bool,
-) -> None:
-    """Validate that tensors are in the correct normalized space [-3, +3]."""
-    noisy_min, noisy_max = float(noisy_batch.min()), float(noisy_batch.max())
-    target_min, target_max = float(target_batch.min()), float(target_batch.max())
-    recon_min, recon_max = float(recon_batch.min()), float(recon_batch.max())
-    
-    # Check if outputs are stuck in [0, 1] (Sigmoid pattern - bad sign)
-    in_sigmoid_range = recon_max <= 1.2 and recon_min >= -0.2
-    if in_sigmoid_range:
-        print(
-            f"[VAE-WARN] Epoch {epoch}: Reconstruction looks like Sigmoid output [0,1]. "
-            f"This suggests training is learning denormalization, not denoising. "
-            f"Range: [{recon_min:.3f}, {recon_max:.3f}]"
-        )
-    
-    # Expected ranges
-    if denormalize_targets:
-        expected_target_max = 1.1  # Denormalized should be [0, 1]
+    device: torch.device,
+    mean: List[float],
+    std: List[float],
+    beta: float,
+    train: bool,
+) -> Tuple[float, float, float]:
+    if train:
+        vae.train()
     else:
-        expected_target_max = 3.5  # Normalized should be roughly [-3, +3]
-    
-    # Warning if ranges don't match expectations
-    if target_max > expected_target_max and not denormalize_targets:
-        pass  # OK for normalized
-    elif target_max <= 1.2 and denormalize_targets:
-        pass  # OK for denormalized
-    
-    # Sanity check: reconstruction should be in same space as target
-    if not (recon_min > -4 and recon_max < 4):
-        print(
-            f"[VAE-WARN] Epoch {epoch}: Reconstruction out of expected range [-4, +4]. "
-            f"Range: [{recon_min:.3f}, {recon_max:.3f}]. Target range: [{target_min:.3f}, {target_max:.3f}]"
-        )
+        vae.eval()
 
+    total_loss = 0.0
+    total_recon = 0.0
+    total_kl = 0.0
+    sample_count = 0
 
-def train_vae(
-    model: ConvVAE,
-    train_loader,
-    val_loader,
-    device: str = "cuda",
-    epochs: int = 50,
-    learning_rate: float = 3e-4,
-    beta: float = 0.5,
-    save_path: str = "models/conv_vae_best.pth",
-    patience: int = 7,
-    checkpoint_dir: str = "models/checkpoints/vae",
-    checkpoint_interval: int = 2,
-    auto_resume: bool = True,
-    use_amp: bool = True,
-    grad_clip_norm: float = 1.0,
-    denormalize_targets: bool = True,
-    beta_schedule: str = "constant",
-    beta_warmup_epochs: int = 10,
-    early_stop_metric: str = "val_recon",
-    recon_loss_type: str = "smooth_l1",
-    huber_delta: float = 1.0,
-) -> Dict[str, List[float]]:
-    device = _resolve_device(device)
-    model = model.to(device)
-    optimizer = AdamW(model.parameters(), lr=learning_rate)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-    early_stopper = EarlyStopper(patience=patience)
-    amp_enabled = bool(use_amp and device.startswith("cuda"))
-    scaler = GradScaler("cuda", enabled=amp_enabled)
+    loop = tqdm(loader, desc="Train" if train else "Val", leave=False)
+    for noisy, clean, _ in loop:
+        noisy = denormalize_batch(noisy.to(device), mean, std)
+        clean = denormalize_batch(clean.to(device), mean, std)
+        batch_size = noisy.size(0)
 
-    history = {
-        "train_recon": [],
-        "train_kl": [],
-        "train_total": [],
-        "train_psnr": [],
-        "val_recon": [],
-        "val_kl": [],
-        "val_total": [],
-        "val_psnr": [],
-        "lr": [],
-        "beta": [],
-        "recon_loss_type": [],
-        "huber_delta": [],
-    }
-
-    best_val = float("inf")
-    save_target = Path(save_path)
-    save_target.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint_root = Path(checkpoint_dir)
-    checkpoint_root.mkdir(parents=True, exist_ok=True)
-    latest_checkpoint = checkpoint_root / "latest.pt"
-
-    start_epoch = 1
-    resume_checkpoint: Path | None = None
-    if auto_resume:
-        if latest_checkpoint.exists():
-            resume_checkpoint = latest_checkpoint
-        else:
-            epoch_checkpoints = sorted(
-                checkpoint_root.glob("epoch_*.pt"),
-                key=_epoch_from_checkpoint_path,
-            )
-            if epoch_checkpoints:
-                resume_checkpoint = epoch_checkpoints[-1]
-
-    if resume_checkpoint is not None:
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
-        state = checkpoint.get("model_state")
-        if state is not None and _state_dict_is_finite(state):
-            model.load_state_dict(state)
-            optimizer.load_state_dict(checkpoint["optimizer_state"])
-            scheduler.load_state_dict(checkpoint["scheduler_state"])
-            if checkpoint.get("scaler_state") is not None and scaler.is_enabled():
-                scaler.load_state_dict(checkpoint["scaler_state"])
-
-            loaded_history = checkpoint.get("history", {})
-            for key in history:
-                history[key] = list(loaded_history.get(key, []))
-
-            best_val = float(checkpoint.get("best_val", best_val))
-            early = checkpoint.get("early_stopper", {})
-            early_stopper.best = float(early.get("best", early_stopper.best))
-            early_stopper.counter = int(early.get("counter", early_stopper.counter))
-            start_epoch = int(checkpoint.get("epoch", 0)) + 1
-            print(f"[VAE] Resuming from epoch {start_epoch} ({resume_checkpoint.name}).")
-        else:
-            print(f"[VAE] Ignoring {resume_checkpoint.name} because it contains non-finite values.")
-
-    if start_epoch > epochs:
-        print("[VAE] Training already completed for configured epochs. Returning loaded history.")
-        return history
-
-    for epoch in range(start_epoch, epochs + 1):
-        if beta_schedule == "linear_warmup":
-            warmup = max(beta_warmup_epochs, 1)
-            current_beta = beta * min(epoch / warmup, 1.0)
-        else:
-            current_beta = beta
-
-        model.train()
-        train_recon = 0.0
-        train_kl = 0.0
-        train_total = 0.0
-        train_psnr = 0.0
-        train_valid_batches = 0
-        saw_non_finite = False
-        validated_ranges_this_epoch = False
-
-        train_bar = tqdm(train_loader, desc=f"[VAE][Train] Epoch {epoch}/{epochs}", leave=False)
-        for noisy, clean, _ in train_bar:
-            noisy = noisy.to(device, non_blocking=True)
-            clean = clean.to(device, non_blocking=True)
-            target_clean = _denormalize_imagenet(clean) if denormalize_targets else clean
-
+        if train:
             optimizer.zero_grad(set_to_none=True)
-            with autocast("cuda", enabled=amp_enabled):
-                recon, mu, logvar = model(noisy)
-                
-                # Validate tensor ranges on first batch of epoch
-                if not validated_ranges_this_epoch:
-                    _validate_tensor_ranges(noisy, target_clean, recon, epoch, denormalize_targets)
-                    validated_ranges_this_epoch = True
-                
-                loss, parts = vae_loss(
-                    recon,
-                    target_clean,
-                    mu,
-                    logvar,
-                    beta=current_beta,
-                    recon_loss_type=recon_loss_type,
-                    huber_delta=huber_delta,
-                )
 
-            if not torch.isfinite(loss):
-                saw_non_finite = True
-                continue
+        with torch.set_grad_enabled(train):
+            recon, mu, logvar = vae(noisy)
+            loss, recon_l, kl_l = vae_loss(recon, clean, mu, logvar, beta=beta)
 
-            scaler.scale(loss).backward()
-            if grad_clip_norm is not None and grad_clip_norm > 0:
-                scaler.unscale_(optimizer)
-                clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-            scaler.step(optimizer)
-            scaler.update()
+            if train:
+                loss.backward()
+                clip_grad_norm_(vae.parameters(), max_norm=1.0)
+                optimizer.step()
 
-            train_recon += parts["recon_loss"]
-            train_kl += parts["kl_loss"]
-            train_total += parts["total_loss"]
-            train_psnr += _batch_psnr(recon.detach(), target_clean.detach())
-            train_valid_batches += 1
+        total_loss += float(loss.item())
+        total_recon += float(recon_l.item())
+        total_kl += float(kl_l.item())
+        sample_count += batch_size
 
-        if train_valid_batches == 0:
-            raise RuntimeError(
-                "All training batches became non-finite. Try lower learning_rate/beta and disable AMP temporarily."
-            )
+    sample_count = max(sample_count, 1)
+    return total_loss / sample_count, total_recon / sample_count, total_kl / sample_count
 
-        n_train = train_valid_batches
-        train_recon /= n_train
-        train_kl /= n_train
-        train_total /= n_train
-        train_psnr /= n_train
 
-        model.eval()
-        val_recon = 0.0
-        val_kl = 0.0
-        val_total = 0.0
-        val_psnr = 0.0
-        val_valid_batches = 0
+def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
+    config = load_config(config_path)
+
+    seed = int(config.get("training", {}).get("seed", 42))
+    set_seed(seed)
+
+    device = torch.device("cpu")
+    dataset_cfg = config.get("dataset", {})
+    vae_cfg = config.get("vae", {})
+    train_cfg = config.get("training", {})
+
+    mean = dataset_cfg.get("mean", [0.5071, 0.4867, 0.4408])
+    std = dataset_cfg.get("std", [0.2675, 0.2565, 0.2761])
+
+    latent_dim = int(vae_cfg.get("latent_dim", 256))
+    beta = float(vae_cfg.get("beta", 0.5))
+    learning_rate = float(vae_cfg.get("learning_rate", 1e-3))
+    epochs = int(vae_cfg.get("epochs", 100))
+    patience = int(vae_cfg.get("patience", 10))
+    save_every = int(train_cfg.get("save_every", 5))
+
+    train_loader, val_loader, _ = get_dataloaders(config)
+
+    vae = ConvVAE(latent_dim=latent_dim).to(device)
+    print_model_summary(vae)
+
+    optimizer = AdamW(vae.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+
+    models_dir = Path("models")
+    results_dir = Path("outputs/results")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    best_path = models_dir / "conv_vae_best.pth"
+    last_path = models_dir / "conv_vae_last.pth"
+
+    history_rows: List[Dict[str, float]] = []
+    best_val_loss = float("inf")
+    best_epoch = 0
+    patience_counter = 0
+
+    for epoch in range(1, epochs + 1):
+        train_loss, train_recon, train_kl = run_epoch(
+            vae,
+            train_loader,
+            optimizer,
+            device,
+            mean,
+            std,
+            beta,
+            train=True,
+        )
 
         with torch.no_grad():
-            val_bar = tqdm(val_loader, desc=f"[VAE][Val]   Epoch {epoch}/{epochs}", leave=False)
-            for noisy, clean, _ in val_bar:
-                noisy = noisy.to(device, non_blocking=True)
-                clean = clean.to(device, non_blocking=True)
-                target_clean = _denormalize_imagenet(clean) if denormalize_targets else clean
-                with autocast("cuda", enabled=amp_enabled):
-                    recon, mu, logvar = model(noisy)
-                    val_loss, parts = vae_loss(
-                        recon,
-                        target_clean,
-                        mu,
-                        logvar,
-                        beta=current_beta,
-                        recon_loss_type=recon_loss_type,
-                        huber_delta=huber_delta,
-                    )
-
-                if not torch.isfinite(val_loss):
-                    saw_non_finite = True
-                    continue
-
-                val_recon += parts["recon_loss"]
-                val_kl += parts["kl_loss"]
-                val_total += parts["total_loss"]
-                val_psnr += _batch_psnr(recon.detach(), target_clean.detach())
-                val_valid_batches += 1
-
-        if val_valid_batches == 0:
-            raise RuntimeError(
-                "All validation batches became non-finite. Stop and lower learning_rate/beta before resuming."
+            val_loss, val_recon, val_kl = run_epoch(
+                vae,
+                val_loader,
+                optimizer,
+                device,
+                mean,
+                std,
+                beta,
+                train=False,
             )
 
-        n_val = val_valid_batches
-        val_recon /= n_val
-        val_kl /= n_val
-        val_total /= n_val
-        val_psnr /= n_val
-
-        history["train_recon"].append(train_recon)
-        history["train_kl"].append(train_kl)
-        history["train_total"].append(train_total)
-        history["train_psnr"].append(train_psnr)
-        history["val_recon"].append(val_recon)
-        history["val_kl"].append(val_kl)
-        history["val_total"].append(val_total)
-        history["val_psnr"].append(val_psnr)
-        history["lr"].append(float(optimizer.param_groups[0]["lr"]))
-        history["beta"].append(float(current_beta))
-        history["recon_loss_type"].append(recon_loss_type)
-        history["huber_delta"].append(float(huber_delta))
-
+        current_lr = float(optimizer.param_groups[0]["lr"])
         scheduler.step()
 
-        print(
-            f"Epoch {epoch:03d} | "
-            f"recon_loss={train_recon:.4f}/{val_recon:.4f} | "
-            f"kl_loss={train_kl:.4f}/{val_kl:.4f} | "
-            f"total_loss={train_total:.4f}/{val_total:.4f} | "
-            f"psnr={train_psnr:.2f}/{val_psnr:.2f} | "
-            f"beta={current_beta:.4f} | "
-            f"lr={optimizer.param_groups[0]['lr']:.2e}"
+        history_rows.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "train_recon": train_recon,
+                "train_kl": train_kl,
+                "val_recon": val_recon,
+                "val_kl": val_kl,
+                "lr": current_lr,
+            }
         )
 
-        if saw_non_finite:
-            print("[VAE] Warning: Non-finite batches were detected and skipped during this epoch.")
+        print(
+            f"Epoch {epoch}/{epochs} | Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_loss:.4f} | Recon: {val_recon:.4f} | "
+            f"KL: {val_kl:.4f} | LR: {current_lr:.6f}"
+        )
 
-        if not all(torch.isfinite(torch.tensor(v)) for v in [train_recon, train_kl, train_total, val_recon, val_kl, val_total]):
-            raise RuntimeError("Epoch metrics became non-finite. Aborting to avoid corrupt checkpoints.")
-
-        tracked_metric = val_recon if early_stop_metric == "val_recon" else val_total
-
-        if tracked_metric < best_val:
-            best_val = tracked_metric
-            torch.save(model.state_dict(), save_target)
-
-        if checkpoint_interval > 0 and epoch % checkpoint_interval == 0:
-            epoch_checkpoint = checkpoint_root / f"epoch_{epoch:04d}.pt"
-            _save_checkpoint(
-                epoch_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val,
-                early_stopper,
-            )
-            _save_checkpoint(
-                latest_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val,
-                early_stopper,
+        if epoch % save_every == 0:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": vae.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "val_loss": val_loss,
+                },
+                models_dir / f"conv_vae_epoch_{epoch}.pth",
             )
 
-        if early_stopper.step(tracked_metric):
-            _save_checkpoint(
-                latest_checkpoint,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                history,
-                best_val,
-                early_stopper,
-            )
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            patience_counter = 0
+            torch.save(vae.state_dict(), best_path)
+        else:
+            patience_counter += 1
+
+        if patience_counter >= patience:
             print(f"Early stopping triggered at epoch {epoch}.")
             break
 
-        if device.startswith("cuda"):
-            torch.cuda.empty_cache()
+    torch.save(vae.state_dict(), last_path)
+    pd.DataFrame(history_rows).to_csv(results_dir / "vae_history.csv", index=False)
 
-    if checkpoint_interval <= 0:
-        _save_checkpoint(
-            latest_checkpoint,
-            epochs,
-            model,
-            optimizer,
-            scheduler,
-            scaler,
-            history,
-            best_val,
-            early_stopper,
-        )
+    print("Training complete!")
+    print(f"Best Val Loss: {best_val_loss:.4f} at Epoch {best_epoch}")
+    print("Model saved: models/conv_vae_best.pth")
 
-    return history
+    return {
+        "train_loss": [row["train_loss"] for row in history_rows],
+        "val_loss": [row["val_loss"] for row in history_rows],
+        "train_recon": [row["train_recon"] for row in history_rows],
+        "train_kl": [row["train_kl"] for row in history_rows],
+        "val_recon": [row["val_recon"] for row in history_rows],
+        "val_kl": [row["val_kl"] for row in history_rows],
+        "lr": [row["lr"] for row in history_rows],
+    }
+
+
+def train_vae(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
+    return train_vae_model(config_path=config_path)
+
+
+if __name__ == "__main__":
+    train_vae_model()
