@@ -122,7 +122,7 @@ A pretrained ResNet-18 backbone fine-tuned on ImageNet-100 for robust classifica
 
 ### Overview
 
-CIFAR-100 is a compact benchmark dataset with 100 object classes and 32x32 RGB images, ideal for fast CPU experimentation.
+CIFAR-100 is a compact benchmark dataset with 100 object classes and 32x32 RGB images, ideal for fast experimentation and GPU training.
 
 | Property | Value |
 |----------|-------|
@@ -281,7 +281,7 @@ src/
 
 - Python 3.10+
 - Node.js 18+ (for web demo)
-- CPU training supported
+- GPU training supported (RTX 3050 recommended)
 - 8GB+ RAM
 - 20GB disk space (for dataset)
 
@@ -300,7 +300,7 @@ venv\Scripts\activate     # Windows
 
 # Install dependencies (choose one)
 pip install -r requirements-dev.txt    # For development/inference
-pip install -r requirements-train.txt  # For CPU training
+pip install -r requirements-train.txt  # For GPU training (CUDA cu121)
 ```
 
 ### Download Dataset

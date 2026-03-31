@@ -26,6 +26,18 @@ def set_seed(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def resolve_device(training_cfg: Dict) -> torch.device:
+    configured = str(training_cfg.get("device", "auto")).strip().lower()
+    if configured == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if configured == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested but unavailable; falling back to CPU.")
+        return torch.device("cpu")
+    return torch.device(configured)
 
 
 def denormalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) -> torch.Tensor:
@@ -83,14 +95,18 @@ def run_epoch(
 
 def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
     config = load_config(config_path)
+    train_cfg = config.get("training", {})
 
-    seed = int(config.get("training", {}).get("seed", 42))
+    seed = int(train_cfg.get("seed", 42))
     set_seed(seed)
 
-    device = torch.device("cpu")
+    device = resolve_device(train_cfg)
+    print(f"Using device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
     dataset_cfg = config.get("dataset", {})
     vae_cfg = config.get("vae", {})
-    train_cfg = config.get("training", {})
 
     mean = dataset_cfg.get("mean", [0.5071, 0.4867, 0.4408])
     std = dataset_cfg.get("std", [0.2675, 0.2565, 0.2761])

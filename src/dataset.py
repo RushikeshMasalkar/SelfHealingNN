@@ -215,6 +215,18 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
     mean = dataset_cfg.get("mean", CIFAR100_MEAN)
     std = dataset_cfg.get("std", CIFAR100_STD)
     seed = int(training_cfg.get("seed", 42))
+    requested_device = str(training_cfg.get("device", "auto")).strip().lower()
+    use_cuda = torch.cuda.is_available() and requested_device in {"auto", "cuda"}
+
+    num_workers = int(training_cfg.get("num_workers", 4 if use_cuda else 0))
+    pin_memory_cfg = training_cfg.get("pin_memory", "auto")
+    if isinstance(pin_memory_cfg, str):
+        if pin_memory_cfg.strip().lower() == "auto":
+            pin_memory = use_cuda
+        else:
+            pin_memory = pin_memory_cfg.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        pin_memory = bool(pin_memory_cfg)
 
     vae_batch = int(config.get("vae", {}).get("batch_size", 64))
     cls_batch = int(config.get("classifier", {}).get("batch_size", vae_batch))
@@ -268,22 +280,22 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     return train_loader, val_loader, test_loader
