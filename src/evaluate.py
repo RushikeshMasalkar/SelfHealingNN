@@ -36,10 +36,28 @@ def compute_metrics(original: torch.Tensor, reconstructed: torch.Tensor) -> Dict
     recon_np = reconstructed.detach().cpu().permute(1, 2, 0).numpy()
 
     psnr = peak_signal_noise_ratio(original_np, recon_np, data_range=1.0)
+    min_side = min(original_np.shape[0], original_np.shape[1])
+    win_size = min(7, min_side)
+    if win_size % 2 == 0:
+        win_size = max(3, win_size - 1)
+
     try:
-        ssim = structural_similarity(original_np, recon_np, data_range=1.0, multichannel=True)
+        # Newer scikit-image uses channel_axis; older versions use multichannel.
+        ssim = structural_similarity(
+            original_np,
+            recon_np,
+            data_range=1.0,
+            channel_axis=-1,
+            win_size=win_size,
+        )
     except TypeError:
-        ssim = structural_similarity(original_np, recon_np, data_range=1.0, channel_axis=2)
+        ssim = structural_similarity(
+            original_np,
+            recon_np,
+            data_range=1.0,
+            multichannel=True,
+            win_size=win_size,
+        )
 
     return {"psnr": float(psnr), "ssim": float(ssim)}
 

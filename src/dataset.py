@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -211,6 +212,14 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
     training_cfg = config.get("training", {})
 
     root = dataset_cfg.get("root", "./data/raw/")
+    root_path = Path(root).expanduser().resolve()
+
+    # Avoid repeated network checks when CIFAR-100 already exists locally.
+    download_cfg = dataset_cfg.get("download", "auto")
+    if isinstance(download_cfg, str) and download_cfg.strip().lower() == "auto":
+        should_download = not (root_path / "cifar-100-python").exists()
+    else:
+        should_download = bool(download_cfg)
     train_split = float(dataset_cfg.get("train_split", 0.9))
     mean = dataset_cfg.get("mean", CIFAR100_MEAN)
     std = dataset_cfg.get("std", CIFAR100_STD)
@@ -248,9 +257,9 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         ]
     )
 
-    train_base = datasets.CIFAR100(root=root, train=True, transform=train_transform, download=True)
-    val_base = datasets.CIFAR100(root=root, train=True, transform=eval_transform, download=True)
-    test_base = datasets.CIFAR100(root=root, train=False, transform=eval_transform, download=True)
+    train_base = datasets.CIFAR100(root=str(root_path), train=True, transform=train_transform, download=should_download)
+    val_base = datasets.CIFAR100(root=str(root_path), train=True, transform=eval_transform, download=should_download)
+    test_base = datasets.CIFAR100(root=str(root_path), train=False, transform=eval_transform, download=should_download)
 
     generator = torch.Generator().manual_seed(seed)
     indices = torch.randperm(len(train_base), generator=generator).tolist()

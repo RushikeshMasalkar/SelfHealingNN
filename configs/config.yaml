@@ -1,6 +1,7 @@
 dataset:
   name: cifar100
   root: ./data/raw/
+  download: auto
   image_size: 32
   num_classes: 100
   mean: [0.5071, 0.4867, 0.4408]
