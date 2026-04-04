@@ -4,13 +4,13 @@ dataset:
   download: auto
   image_size: 32
   num_classes: 100
-  mean: [0.5071, 0.4867, 0.4408]
-  std: [0.2675, 0.2565, 0.2761]
+  mean: [0.5071, 0.4865, 0.4409]
+  std: [0.2673, 0.2564, 0.2761]
   train_split: 0.9
 
 noise:
   types: [gaussian, salt_pepper, occlusion]
-  gaussian_std: 0.3
+  gaussian_std: 0.15
   salt_pepper_prob: 0.05
   occlusion_size: 8
 

@@ -11,8 +11,8 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 from tqdm import tqdm
 
 
-CIFAR100_MEAN = [0.5071, 0.4867, 0.4408]
-CIFAR100_STD = [0.2675, 0.2565, 0.2761]
+CIFAR100_MEAN = [0.5071, 0.4865, 0.4409]
+CIFAR100_STD = [0.2673, 0.2564, 0.2761]
 
 
 def normalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) -> torch.Tensor:
@@ -29,6 +29,13 @@ def denormalize_batch(batch: torch.Tensor, mean: List[float], std: List[float]) 
 
 def add_gaussian_noise(batch: torch.Tensor, std: float) -> torch.Tensor:
     return torch.clamp(batch + torch.randn_like(batch) * std, 0.0, 1.0)
+
+
+def top5_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> int:
+    """Return the number of correctly predicted samples using top-5 criterion."""
+    top5 = logits.topk(5, dim=1).indices
+    correct = top5.eq(labels.view(-1, 1)).any(dim=1)
+    return int(correct.sum().item())
 
 
 def compute_metrics(original: torch.Tensor, reconstructed: torch.Tensor) -> Dict[str, float]:
@@ -108,9 +115,9 @@ def evaluate_pipeline(
     with torch.no_grad():
         for noise_level in tqdm(list(noise_levels), desc="Evaluating noise levels"):
             stats = {
-                "clean": {"correct": 0, "total": 0, "psnr": [], "ssim": []},
-                "noisy": {"correct": 0, "total": 0, "psnr": [], "ssim": []},
-                "healed": {"correct": 0, "total": 0, "psnr": [], "ssim": []},
+                "clean": {"correct": 0, "top5_correct": 0, "total": 0, "psnr": [], "ssim": []},
+                "noisy": {"correct": 0, "top5_correct": 0, "total": 0, "psnr": [], "ssim": []},
+                "healed": {"correct": 0, "top5_correct": 0, "total": 0, "psnr": [], "ssim": []},
             }
 
             preview_originals = None
@@ -132,9 +139,15 @@ def evaluate_pipeline(
                 recon_norm = normalize_batch(recon_pixel, CIFAR100_MEAN, CIFAR100_STD)
                 healed_logits = classifier(recon_norm)
 
+                # Top-1 accuracy
                 stats["clean"]["correct"] += int((clean_logits.argmax(dim=1) == labels).sum().item())
                 stats["noisy"]["correct"] += int((noisy_logits.argmax(dim=1) == labels).sum().item())
                 stats["healed"]["correct"] += int((healed_logits.argmax(dim=1) == labels).sum().item())
+
+                # Top-5 accuracy
+                stats["clean"]["top5_correct"] += top5_accuracy(clean_logits, labels)
+                stats["noisy"]["top5_correct"] += top5_accuracy(noisy_logits, labels)
+                stats["healed"]["top5_correct"] += top5_accuracy(healed_logits, labels)
 
                 batch_size = labels.size(0)
                 stats["clean"]["total"] += batch_size
@@ -155,37 +168,27 @@ def evaluate_pipeline(
                     preview_noisy = noisy_pixel[:8].detach().cpu()
                     preview_recon = recon_pixel[:8].detach().cpu()
 
-            clean_acc = 100.0 * stats["clean"]["correct"] / max(stats["clean"]["total"], 1)
-            noisy_acc = 100.0 * stats["noisy"]["correct"] / max(stats["noisy"]["total"], 1)
-            healed_acc = 100.0 * stats["healed"]["correct"] / max(stats["healed"]["total"], 1)
+            for key in ("clean", "noisy", "healed"):
+                total = max(stats[key]["total"], 1)
+                stats[key]["top1_acc"] = 100.0 * stats[key]["correct"] / total
+                stats[key]["top5_acc"] = 100.0 * stats[key]["top5_correct"] / total
 
-            results.append(
-                {
+            condition_map = {
+                "clean": "Clean -> Classifier",
+                "noisy": "Noisy -> Classifier",
+                "healed": "Noisy -> VAE -> Classifier",
+            }
+
+            for key, condition in condition_map.items():
+                entry = {
                     "noise_level": float(noise_level),
-                    "condition": "Clean -> Classifier",
-                    "accuracy": float(clean_acc),
-                    "psnr": np.nan,
-                    "ssim": np.nan,
+                    "condition": condition,
+                    "accuracy": float(stats[key]["top1_acc"]),
+                    "top5_accuracy": float(stats[key]["top5_acc"]),
+                    "psnr": float(np.mean(stats[key]["psnr"])) if stats[key]["psnr"] else np.nan,
+                    "ssim": float(np.mean(stats[key]["ssim"])) if stats[key]["ssim"] else np.nan,
                 }
-            )
-            results.append(
-                {
-                    "noise_level": float(noise_level),
-                    "condition": "Noisy -> Classifier",
-                    "accuracy": float(noisy_acc),
-                    "psnr": float(np.mean(stats["noisy"]["psnr"])) if stats["noisy"]["psnr"] else np.nan,
-                    "ssim": float(np.mean(stats["noisy"]["ssim"])) if stats["noisy"]["ssim"] else np.nan,
-                }
-            )
-            results.append(
-                {
-                    "noise_level": float(noise_level),
-                    "condition": "Noisy -> VAE -> Classifier",
-                    "accuracy": float(healed_acc),
-                    "psnr": float(np.mean(stats["healed"]["psnr"])) if stats["healed"]["psnr"] else np.nan,
-                    "ssim": float(np.mean(stats["healed"]["ssim"])) if stats["healed"]["ssim"] else np.nan,
-                }
-            )
+                results.append(entry)
 
             if preview_originals is not None:
                 save_comparison_grid(
@@ -201,5 +204,5 @@ def evaluate_pipeline(
 def save_results_csv(results_dict: List[Dict[str, float]]) -> None:
     output_path = Path("outputs/results/final_metrics.csv")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    columns = ["noise_level", "condition", "accuracy", "psnr", "ssim"]
+    columns = ["noise_level", "condition", "accuracy", "top5_accuracy", "psnr", "ssim"]
     pd.DataFrame(results_dict, columns=columns).to_csv(output_path, index=False)

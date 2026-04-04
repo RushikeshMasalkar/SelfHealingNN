@@ -108,8 +108,8 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
     dataset_cfg = config.get("dataset", {})
     vae_cfg = config.get("vae", {})
 
-    mean = dataset_cfg.get("mean", [0.5071, 0.4867, 0.4408])
-    std = dataset_cfg.get("std", [0.2675, 0.2565, 0.2761])
+    mean = dataset_cfg.get("mean", [0.5071, 0.4865, 0.4409])
+    std = dataset_cfg.get("std", [0.2673, 0.2564, 0.2761])
 
     latent_dim = int(vae_cfg.get("latent_dim", 256))
     beta = float(vae_cfg.get("beta", 0.5))

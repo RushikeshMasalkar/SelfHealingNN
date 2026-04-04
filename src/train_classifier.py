@@ -125,8 +125,8 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
     dataset_cfg = config.get("dataset", {})
     classifier_cfg = config.get("classifier", {})
 
-    mean = dataset_cfg.get("mean", [0.5071, 0.4867, 0.4408])
-    std = dataset_cfg.get("std", [0.2675, 0.2565, 0.2761])
+    mean = dataset_cfg.get("mean", [0.5071, 0.4865, 0.4409])
+    std = dataset_cfg.get("std", [0.2673, 0.2564, 0.2761])
 
     train_loader, val_loader, _ = get_dataloaders(config)
 

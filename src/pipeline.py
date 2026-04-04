@@ -11,8 +11,8 @@ from .conv_vae import ConvVAE
 from .dataset import CIFAR100_CLASSES
 
 
-CIFAR100_MEAN = [0.5071, 0.4867, 0.4408]
-CIFAR100_STD = [0.2675, 0.2565, 0.2761]
+CIFAR100_MEAN = [0.5071, 0.4865, 0.4409]
+CIFAR100_STD = [0.2673, 0.2564, 0.2761]
 
 
 def normalize_batch(batch: torch.Tensor) -> torch.Tensor:
