@@ -4,7 +4,7 @@ const stack = [
   'PyTorch',
   'ConvVAE',
   'ResNet-18',
-  'ImageNet-100',
+  'CIFAR-100',
   'Node.js + Express',
   'React + Vite',
   'Framer Motion',

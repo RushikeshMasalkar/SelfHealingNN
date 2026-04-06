@@ -128,6 +128,17 @@ def denormalize_tensor(image: torch.Tensor, mean: List[float], std: List[float])
     return torch.clamp(image * std_t + mean_t, 0.0, 1.0)
 
 
+def _resolve_dataset_root(root: str) -> Path:
+    path = Path(root).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+
+    # Resolve relative data paths from the repository root so notebook cwd differences
+    # do not create duplicate dataset directories.
+    repo_root = Path(__file__).resolve().parents[1]
+    return (repo_root / path).resolve()
+
+
 class NoiseInjector:
     """Applies synthetic noise to image tensors in [0, 1] range."""
 
@@ -206,13 +217,19 @@ class NoisyCIFAR100(Dataset):
         return noisy_image, clean_image, int(label)
 
 
-def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
+def get_dataloaders(
+    config: Dict,
+    augment_train: bool = True,
+    noise_types_override: Optional[List[str]] = None,
+    noise_params_override: Optional[Dict[str, float]] = None,
+    batch_size_override: Optional[int] = None,
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
     dataset_cfg = config.get("dataset", {})
     noise_cfg = config.get("noise", {})
     training_cfg = config.get("training", {})
 
-    root = dataset_cfg.get("root", "./data/raw/")
-    root_path = Path(root).expanduser().resolve()
+    root = str(dataset_cfg.get("root", "./data/raw/"))
+    root_path = _resolve_dataset_root(root)
 
     # Avoid repeated network checks when CIFAR-100 already exists locally.
     download_cfg = dataset_cfg.get("download", "auto")
@@ -239,17 +256,25 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     vae_batch = int(config.get("vae", {}).get("batch_size", 64))
     cls_batch = int(config.get("classifier", {}).get("batch_size", vae_batch))
-    batch_size = max(vae_batch, cls_batch)
+    batch_size = int(batch_size_override) if batch_size_override is not None else max(vae_batch, cls_batch)
 
-    train_transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomCrop(32, padding=4),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ]
-    )
+    if augment_train:
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomCrop(32, padding=4),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+    else:
+        train_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
     eval_transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -279,7 +304,13 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         "salt_pepper_prob": float(noise_cfg.get("salt_pepper_prob", 0.05)),
         "occlusion_size": int(noise_cfg.get("occlusion_size", 8)),
     }
-    noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper", "occlusion"]))
+    if noise_params_override:
+        noise_params.update(noise_params_override)
+
+    if noise_types_override is not None:
+        noise_types = list(noise_types_override)
+    else:
+        noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper", "occlusion"]))
 
     train_dataset = NoisyCIFAR100(train_subset, noise_types=noise_types, noise_params=noise_params, mean=mean, std=std)
     val_dataset = NoisyCIFAR100(val_subset, noise_types=noise_types, noise_params=noise_params, mean=mean, std=std)
@@ -310,6 +341,4 @@ def get_dataloaders(config: Dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
     return train_loader, val_loader, test_loader
 
 
-# Backward compatibility exports for existing imports in package init.
-ImageNet100Dataset = datasets.CIFAR100
-NoisyImageNet100Dataset = NoisyCIFAR100
+

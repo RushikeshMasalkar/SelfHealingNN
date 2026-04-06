@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/License-MIT-16A34A?style=for-the-badge)](LICENSE)
 
 <p align="center">
-  <strong>A two-stage deep learning pipeline that restores corrupted images using a Convolutional VAE before classification with a fine-tuned ResNet-18, achieving state-of-the-art robustness on ImageNet-100.</strong>
+  <strong>A two-stage deep learning pipeline that restores corrupted CIFAR-100 images (32×32) using a Convolutional VAE before classification with a ResNet-18 adapted for small inputs. Reported numbers below are illustrative—always use your own <code>outputs/results/</code> after training.</strong>
 </p>
 
 [Features](#-key-features) | [Architecture](#-architecture) | [Results](#-experimental-results) | [Installation](#-installation) | [Demo](#-web-demo) | [Documentation](#-documentation)
@@ -22,9 +22,9 @@
 
 ## Abstract
 
-This project presents a **Self-Healing Neural Network** designed to maintain high classification accuracy on severely corrupted images. Traditional CNNs suffer dramatic performance degradation when inputs are corrupted by noise, occlusion, or artifacts. Our two-stage approach first "heals" corrupted images using a Convolutional Variational Autoencoder (ConvVAE), then classifies the restored images using a fine-tuned ResNet-18 classifier.
+This project presents a **Self-Healing Neural Network** for **CIFAR-100** (32×32 RGB, 100 classes). Traditional CNNs degrade when inputs are corrupted by noise, occlusion, or artifacts. The pipeline first reconstructs corrupted images with a **ConvVAE** (trained on noisy→clean pairs), then classifies either **true clean** or **VAE outputs** using a **ResNet-18** with a CIFAR-friendly stem (3×3 stride-1 conv, no initial max-pool). Classifier training **mixes** normalized clean images with VAE-healed images so evaluation on the clean branch is not out-of-distribution.
 
-**Key Achievement:** Recovers **91.4% Top-1 accuracy** on heavily corrupted images (vs. 47.3% without healing) — a **+44.1% improvement**.
+**Metrics:** After training, see `outputs/results/final_metrics.csv` (per-protocol rows), `evaluation_summary.json`, and confusion-matrix `.npy`/`.png` files. The notebook `05_Evaluation_and_Results.ipynb` plots **train-matched** noise (from `configs/config.yaml`) and a separate **Gaussian stress** sweep.
 
 ---
 
@@ -34,7 +34,7 @@ This project presents a **Self-Healing Neural Network** designed to maintain hig
 |---------|-------------|
 | **Two-Stage Pipeline** | ConvVAE healer + ResNet-18 classifier working in tandem |
 | **Multiple Noise Types** | Handles Gaussian, Salt & Pepper, Block Occlusion, and mixed noise |
-| **High Accuracy** | 94.7% on clean images, 91.4% on corrupted (with healing) |
+| **Honest evaluation** | Train-matched noise types + optional Gaussian stress sweep; macro-F1, ECE, confusion matrices in `outputs/results/` |
 | **Real-time Inference** | ~45ms per image on RTX 3050 GPU |
 | **Interactive Web Demo** | Modern React 18 frontend with live image upload and visualization |
 | **Comprehensive Notebooks** | 5 Jupyter notebooks for training, evaluation, and visualization |
@@ -60,7 +60,7 @@ This project presents a **Self-Healing Neural Network** designed to maintain hig
 │          │                      │                         │                 │
 │          ▼                      ▼                         ▼                 │
 │    ┌──────────────┐     ┌──────────────────┐     ┌───────────────────┐     │
-│    │  224×224×3   │     │  Reconstructed   │     │  100-class        │     │
+│    │  32×32×3     │     │  Reconstructed   │     │  100-class        │     │
 │    │  RGB Image   │     │  Clean Image     │     │  Prediction       │     │
 │    └──────────────┘     └──────────────────┘     └───────────────────┘     │
 │                                                                             │
@@ -74,16 +74,16 @@ The ConvVAE learns to reconstruct clean images from corrupted inputs by mapping 
 ```
 ENCODER                              DECODER
 ┌─────────────────┐                  ┌─────────────────┐
-│ Input: 224×224×3│                  │ Latent: 512-dim │
+│ Input: 32×32×3  │                  │ Latent: 128-dim │
 ├─────────────────┤                  ├─────────────────┤
-│ Conv2d(3→32)    │                  │ FC(512→8192)    │
-│ BatchNorm + ReLU│                  │ Reshape(128,8,8)│
-│ Conv2d(32→64)   │                  │ ConvT(128→64)   │
+│ Conv2d(3→64)    │                  │ FC(128→4096)    │
+│ BatchNorm + ReLU│                  │ Reshape(256,4,4)│
+│ Conv2d(64→128)  │                  │ ConvT(256→128)  │
 │ BatchNorm + ReLU│                  │ BatchNorm + ReLU│
-│ Conv2d(64→128)  │                  │ ConvT(64→32)    │
+│ Conv2d(128→256) │                  │ ConvT(128→64)   │
 │ BatchNorm + ReLU│                  │ BatchNorm + ReLU│
-│ Flatten         │                  │ ConvT(32→3)     │
-│ FC → μ, log(σ²) │                  │ Sigmoid         │
+│ Flatten         │                  │ ConvT(64→32)    │
+│ FC → μ, log(σ²) │                  │ Conv(32→3)      │
 └────────┬────────┘                  └────────▲────────┘
          │                                    │
          │         ┌─────────────┐            │
@@ -94,27 +94,27 @@ ENCODER                              DECODER
 
 | Component | Specification |
 |-----------|---------------|
-| Input Resolution | 224 × 224 × 3 |
-| Encoder Layers | 4 Conv blocks (32→64→128→256 channels) |
-| Latent Dimension | 512 |
-| Decoder Layers | 4 ConvTranspose blocks |
-| Loss Function | MSE Reconstruction + β-KL Divergence (β=0.5) |
-| Optimizer | AdamW (lr=3e-4) |
-| Training Epochs | 50 (with early stopping, patience=7) |
+| Input Resolution | 32 × 32 × 3 (CIFAR-100) |
+| Encoder Layers | 3 Conv blocks (64→128→256 channels) |
+| Latent Dimension | 128 (default in `configs/config.yaml`) |
+| Decoder Layers | 3 ConvTranspose blocks + 1 Conv |
+| Loss Function | L1/MSE Reconstruction + β-KL Divergence (β=0.015) |
+| Optimizer | AdamW (lr=0.0005) |
+| Training Epochs | 100 (with early stopping; β linear warmup optional via `vae.beta_warmup_epochs`) |
 
 ### Stage B: ResNet-18 Classifier (Expert)
 
-A pretrained ResNet-18 backbone fine-tuned on ImageNet-100 for robust classification.
+A pretrained ResNet-18 backbone modified for 32x32 CIFAR-100 images and fine-tuned for robust classification.
 
 | Component | Specification |
 |-----------|---------------|
 | Backbone | ResNet-18 (pretrained on ImageNet-1K) |
 | Feature Dimension | 512 |
 | Output Classes | 100 |
-| Fine-tuning Strategy | Full network with lower LR on backbone |
-| Optimizer | AdamW (lr=1e-4 backbone, lr=1e-3 head) |
-| Scheduler | CosineAnnealingLR |
-| Training Epochs | 30 |
+| Fine-tuning Strategy | Phase 1: frozen backbone + head; Phase 2: full network |
+| Optimizer | AdamW (see `classifier.head_learning_rate` and `classifier.learning_rate` in config) |
+| Scheduler | CosineAnnealingLR (phase 2) |
+| Training | Mixes clean normalized inputs with VAE-healed inputs (`classifier.clean_input_mix_prob`) |
 
 ---
 
@@ -138,14 +138,9 @@ CIFAR-100 is a compact benchmark dataset with 100 object classes and 32x32 RGB i
 | **Normalization** | CIFAR-100 mean/std |
 | **Setup** | Auto-downloads via PyTorch (no manual setup) |
 
-### Sample Classes
+### Sample class names (human-readable)
 
-```
-n01440764 (tench), n01443537 (goldfish), n01484850 (great white shark),
-n01491361 (tiger shark), n01494475 (hammerhead), n01496331 (electric ray),
-n01498041 (stingray), n01514668 (cock), n01514859 (hen), n01518878 (ostrich),
-... and 90 more diverse categories
-```
+CIFAR-100 fine labels include `apple`, `aquarium_fish`, `baby`, `bear`, … (see `src/dataset.py` for the full list).
 
 ### Noise Types & Parameters
 
@@ -158,48 +153,18 @@ n01498041 (stingray), n01514668 (cock), n01514859 (hen), n01518878 (ostrich),
 
 ---
 
-## Experimental Results
+## Experimental results
 
-### Main Results
+Run `python -m src.train_vae`, then `python -m src.train_classifier`, then evaluation from `05_Evaluation_and_Results.ipynb` or by calling `src.evaluate.evaluate_pipeline`.
 
-| Condition | Top-1 Accuracy |
-|-----------|----------------|
-| Clean → ResNet | 91.5% |
-| Noisy → ResNet (raw) | 54.2% |
-| Noisy → VAE → ResNet | 85.8% |
+**`outputs/results/final_metrics.csv`** contains one row per `(protocol, noise_type, severity, condition)` with:
 
-### Accuracy Recovery: **+44.1%** improvement on corrupted images
+- `protocol`: `train_matched` (severities from `configs/config.yaml`) or `gaussian_stress` (extra Gaussian-only sweep).
+- `condition`: `Clean -> Classifier`, `Noisy -> Classifier`, or `Noisy -> VAE -> Classifier`.
+- `accuracy`, `top5_accuracy`, `macro_f1`, `ece`, `psnr`, `ssim` (PSNR/SSIM where applicable).
 
-### Breakdown by Noise Type
+**`outputs/results/evaluation_summary.json`** records which protocols and noise settings were used. Confusion matrices for the clean baseline and the first train-matched healed setting are saved as `confusion_matrix_*.npy` and `.png`.
 
-| Noise Type | Severity | Baseline | With Healing | Recovery |
-|------------|----------|----------|--------------|----------|
-| Gaussian | σ=0.1 | 72.3% | 93.1% | +20.8% |
-| Gaussian | σ=0.2 | 54.6% | 91.8% | +37.2% |
-| Gaussian | σ=0.3 | 38.2% | 89.4% | +51.2% |
-| Salt & Pepper | p=0.05 | 68.9% | 92.7% | +23.8% |
-| Salt & Pepper | p=0.10 | 51.4% | 90.9% | +39.5% |
-| Salt & Pepper | p=0.15 | 35.7% | 88.3% | +52.6% |
-| Occlusion | 32×32 | 81.2% | 93.4% | +12.2% |
-| Occlusion | 56×56 | 62.8% | 91.1% | +28.3% |
-| Occlusion | 84×84 | 41.5% | 86.7% | +45.2% |
-
-### VAE Reconstruction Quality
-
-| Metric | Clean Input | Noisy Input (σ=0.2) |
-|--------|-------------|---------------------|
-| PSNR | 38.2 dB | 29.7 dB |
-| SSIM | 0.982 | 0.891 |
-| LPIPS | 0.012 | 0.087 |
-
-### Training Performance
-
-| Model | Training Time | GPU Memory | Epochs | Best Val Loss |
-|-------|---------------|------------|--------|---------------|
-| ConvVAE | ~6 hours | 4.2 GB | 50 | 0.0142 |
-| ResNet-18 | ~2 hours | 3.8 GB | 30 | 0.0891 |
-
-*Benchmarked on NVIDIA RTX 3050 (4GB VRAM)*
 
 ---
 
@@ -398,33 +363,34 @@ models/
 
 All hyperparameters are centralized in `configs/config.yaml`:
 
+See **[configs/config.yaml](configs/config.yaml)** for the live values. Overview:
+
 ```yaml
-data:
-  root: "./data/raw"
-  image_size: 224
-  batch_size: 32
-  train_split: 0.8
-  num_workers: 4
-
-vae:
-  latent_dim: 512
-  beta: 0.5
-  learning_rate: 0.0003
-  epochs: 50
-  patience: 7
-
-classifier:
-  backbone: "resnet18"
-  pretrained: true
-  num_classes: 100
-  learning_rate: 0.0001
-  epochs: 30
+dataset:
+  name: cifar100
+  image_size: 32
+  train_split: 0.9
 
 noise:
-  types: ["gaussian", "salt_pepper", "occlusion"]
-  gaussian_std: 0.2
-  salt_pepper_prob: 0.1
-  occlusion_size: 56
+  types: [gaussian, salt_pepper, occlusion]
+  gaussian_std: 0.15
+  salt_pepper_prob: 0.05
+  occlusion_size: 8
+
+evaluation:
+  gaussian_stress_levels: [0.1, 0.2, 0.3, 0.5, 0.7]
+
+vae:
+  latent_dim: 256
+  beta: 0.5
+  beta_warmup_epochs: 15
+
+classifier:
+  head_learning_rate: 0.001
+  learning_rate: 0.0001
+  clean_input_mix_prob: 0.5
+  phase1_epochs: 10
+  phase2_epochs: 40
 ```
 
 ### API Reference
@@ -468,7 +434,7 @@ SelfHealingNN/
 ├── configs/
 │   └── config.yaml              # Centralized hyperparameters
 ├── data/
-│   ├── raw/                     # Original ImageNet-100 images
+│   ├── raw/                     # CIFAR-100 (torchvision download)
 │   ├── processed/               # Preprocessed tensors (optional)
 │   └── samples/                 # Sample images for testing
 ├── models/
@@ -491,7 +457,7 @@ SelfHealingNN/
 │   ├── pipeline.py              # End-to-end inference
 │   ├── train_vae.py             # VAE training script
 │   ├── train_classifier.py      # Classifier training script
-│   └── evaluate.py              # Metrics and evaluation
+│   └── evaluate.py              # Train-matched + stress metrics, confusion matrices
 ├── web/
 │   ├── backend/
 │   │   ├── routes/
@@ -607,7 +573,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- ImageNet-100 dataset from [Kaggle](https://www.kaggle.com/datasets/ambityga/imagenet100)
+- CIFAR-100 dataset from torchvision
 - PyTorch team for the deep learning framework
 - ResNet architecture from [Deep Residual Learning](https://arxiv.org/abs/1512.03385)
 - VAE fundamentals from [Auto-Encoding Variational Bayes](https://arxiv.org/abs/1312.6114)

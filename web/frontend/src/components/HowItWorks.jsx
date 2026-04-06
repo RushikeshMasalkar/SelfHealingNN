@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 
 const steps = [
-  'Load a 224x224 RGB sample from ImageNet-100.',
+  'Load a 32x32 RGB sample from CIFAR-100.',
   'Inject Gaussian, Salt & Pepper, or block occlusion noise.',
   'ConvVAE encoder maps corrupted image into 512-dimensional latent space.',
   'ConvVAE decoder reconstructs a denoised approximation.',

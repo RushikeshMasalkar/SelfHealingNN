@@ -17,7 +17,7 @@ function Architecture() {
         </defs>
 
         {[
-          { x: 20, label: 'Input\n224x224 RGB' },
+          { x: 20, label: 'Input\n32x32 RGB' },
           { x: 200, label: 'Noise\nInjector' },
           { x: 380, label: 'ConvVAE\nLatent z=512' },
           { x: 580, label: 'ResNet-18\nClassifier' },

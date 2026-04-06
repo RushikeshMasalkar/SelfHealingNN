@@ -37,7 +37,7 @@ function Hero() {
           transition={{ duration: 0.7 }}
           style={{ fontSize: 'clamp(2rem, 6vw, 4rem)', marginBottom: '0.8rem' }}
         >
-          Self-Healing Neural Network for ImageNet-100
+          Self-Healing Neural Network for CIFAR-100
         </motion.h1>
         <motion.p
           initial={{ opacity: 0, y: 24 }}

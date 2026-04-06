@@ -24,7 +24,7 @@ function App() {
       >
         <h2>Problem Statement</h2>
         <p>
-          Standard classifiers collapse when corruption rises. On ImageNet-100, direct inference drops from
+          Standard classifiers collapse when corruption rises. On CIFAR-100, direct inference drops from
           <strong> 94.2%</strong> on clean images to <strong>51.7%</strong> at heavy noise. This project inserts a
           Convolutional VAE healer before ResNet-18 so the system recovers useful structure before classification.
         </p>

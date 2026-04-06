@@ -84,9 +84,9 @@ def run_epoch(
                 clip_grad_norm_(vae.parameters(), max_norm=1.0)
                 optimizer.step()
 
-        total_loss += float(loss.item())
-        total_recon += float(recon_l.item())
-        total_kl += float(kl_l.item())
+        total_loss += float(loss.item()) * float(batch_size)
+        total_recon += float(recon_l.item()) * float(batch_size)
+        total_kl += float(kl_l.item()) * float(batch_size)
         sample_count += batch_size
 
     sample_count = max(sample_count, 1)
@@ -112,13 +112,32 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
     std = dataset_cfg.get("std", [0.2673, 0.2564, 0.2761])
 
     latent_dim = int(vae_cfg.get("latent_dim", 256))
-    beta = float(vae_cfg.get("beta", 0.5))
+    beta = float(vae_cfg.get("beta", 0.08))
+    beta_warmup_epochs = int(vae_cfg.get("beta_warmup_epochs", 0))
+    beta_start_factor = float(vae_cfg.get("beta_start_factor", 0.3))
+    beta_start_factor = min(max(beta_start_factor, 0.0), 1.0)
     learning_rate = float(vae_cfg.get("learning_rate", 1e-3))
     epochs = int(vae_cfg.get("epochs", 100))
     patience = int(vae_cfg.get("patience", 10))
+    min_epochs_before_early_stop = int(vae_cfg.get("min_epochs_before_early_stop", 0))
+    min_improvement = float(vae_cfg.get("min_improvement", 0.0))
     save_every = int(train_cfg.get("save_every", 5))
 
-    train_loader, val_loader, _ = get_dataloaders(config)
+    vae_augment_train = bool(vae_cfg.get("augment_train", False))
+    vae_noise_types = list(vae_cfg.get("noise_types", config.get("noise", {}).get("types", ["gaussian"])))
+    vae_noise_params = {
+        "gaussian_std": float(vae_cfg.get("gaussian_std", config.get("noise", {}).get("gaussian_std", 0.15))),
+        "salt_pepper_prob": float(vae_cfg.get("salt_pepper_prob", config.get("noise", {}).get("salt_pepper_prob", 0.05))),
+        "occlusion_size": int(vae_cfg.get("occlusion_size", config.get("noise", {}).get("occlusion_size", 8))),
+    }
+
+    train_loader, val_loader, _ = get_dataloaders(
+        config,
+        augment_train=vae_augment_train,
+        noise_types_override=vae_noise_types,
+        noise_params_override=vae_noise_params,
+        batch_size_override=int(vae_cfg.get("batch_size", 64)),
+    )
 
     vae = ConvVAE(latent_dim=latent_dim).to(device)
     print_model_summary(vae)
@@ -126,8 +145,10 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
     optimizer = AdamW(vae.parameters(), lr=learning_rate, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
-    models_dir = Path("models")
-    results_dir = Path("outputs/results")
+    repo_root = Path(__file__).resolve().parents[1]
+    models_dir = repo_root / "models"
+    results_dir = repo_root / "outputs" / "results"
+    
     models_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -140,6 +161,12 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
     patience_counter = 0
 
     for epoch in range(1, epochs + 1):
+        if beta_warmup_epochs > 0:
+            progress = min(1.0, float(epoch) / float(beta_warmup_epochs))
+            beta_eff = beta * (beta_start_factor + (1.0 - beta_start_factor) * progress)
+        else:
+            beta_eff = beta
+
         train_loss, train_recon, train_kl = run_epoch(
             vae,
             train_loader,
@@ -147,7 +174,7 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
             device,
             mean,
             std,
-            beta,
+            beta_eff,
             train=True,
         )
 
@@ -159,7 +186,7 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
                 device,
                 mean,
                 std,
-                beta,
+                beta_eff,
                 train=False,
             )
 
@@ -176,13 +203,14 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
                 "val_recon": val_recon,
                 "val_kl": val_kl,
                 "lr": current_lr,
+                "beta_effective": beta_eff,
             }
         )
 
         print(
             f"Epoch {epoch}/{epochs} | Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f} | Recon: {val_recon:.4f} | "
-            f"KL: {val_kl:.4f} | LR: {current_lr:.6f}"
+            f"KL: {val_kl:.6e} | beta: {beta_eff:.4f} | LR: {current_lr:.6f}"
         )
 
         if epoch % save_every == 0:
@@ -197,7 +225,7 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
                 models_dir / f"conv_vae_epoch_{epoch}.pth",
             )
 
-        if val_loss < best_val_loss:
+        if val_loss < (best_val_loss - min_improvement):
             best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
@@ -205,8 +233,16 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
         else:
             patience_counter += 1
 
-        if patience_counter >= patience:
-            print(f"Early stopping triggered at epoch {epoch}.")
+        print(
+            f"No-improvement counter: {patience_counter}/{patience} | "
+            f"Best epoch: {best_epoch}"
+        )
+
+        if epoch >= min_epochs_before_early_stop and patience_counter >= patience:
+            print(
+                f"Early stopping triggered at epoch {epoch} "
+                f"(min_epochs_before_early_stop={min_epochs_before_early_stop})."
+            )
             break
 
     torch.save(vae.state_dict(), last_path)
@@ -224,6 +260,7 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
         "val_recon": [row["val_recon"] for row in history_rows],
         "val_kl": [row["val_kl"] for row in history_rows],
         "lr": [row["lr"] for row in history_rows],
+        "beta_effective": [row["beta_effective"] for row in history_rows],
     }
 
 

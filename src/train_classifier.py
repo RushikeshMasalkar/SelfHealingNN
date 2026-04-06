@@ -70,20 +70,24 @@ def run_classifier_epoch(
     std: List[float],
     train: bool,
     phase_label: str,
-) -> Tuple[float, float, float]:
+    clean_mix_prob: float,
+) -> Tuple[float, float, float, float, float]:
     if train:
         classifier.train()
     else:
         classifier.eval()
 
     total_loss = 0.0
-    total_top1 = 0.0
-    total_top5 = 0.0
+    total_top1_combined = 0.0
+    total_top5_combined = 0.0
+    total_top1_clean = 0.0
+    total_top1_healed = 0.0
     batch_count = 0
 
     loop = tqdm(loader, desc=phase_label, leave=False)
-    for noisy, _, labels in loop:
+    for noisy, clean, labels in loop:
         noisy = noisy.to(device)
+        clean = clean.to(device)
         labels = labels.to(device)
 
         with torch.no_grad():
@@ -95,19 +99,56 @@ def run_classifier_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(train):
-            logits = classifier(cleaned)
-            loss = criterion(logits, labels)
             if train:
-                loss.backward()
-                optimizer.step()
+                batch_size = clean.size(0)
+                use_clean = torch.rand(batch_size, device=device) < float(clean_mix_prob)
+                mask = use_clean.view(-1, 1, 1, 1).expand_as(clean)
+                classifier_input = torch.where(mask, clean, cleaned)
+                logits = classifier(classifier_input)
+                loss = criterion(logits, labels)
+                if train:
+                    loss.backward()
+                    optimizer.step()
+            else:
+                logits_clean = classifier(clean)
+                logits_healed = classifier(cleaned)
+                loss = 0.5 * (criterion(logits_clean, labels) + criterion(logits_healed, labels))
+                logits = logits_healed
+
+        if train:
+            top1 = float((logits.argmax(dim=1) == labels).float().mean().item())
+            top5 = top5_accuracy(logits, labels)
+            top1_clean_br = float("nan")
+            top1_healed_br = float("nan")
+        else:
+            top1_clean_br = float((logits_clean.argmax(dim=1) == labels).float().mean().item())
+            top1_healed_br = float((logits_healed.argmax(dim=1) == labels).float().mean().item())
+            top1 = 0.5 * (top1_clean_br + top1_healed_br)
+            top5 = 0.5 * (top5_accuracy(logits_clean, labels) + top5_accuracy(logits_healed, labels))
 
         total_loss += float(loss.item())
-        total_top1 += float((logits.argmax(dim=1) == labels).float().mean().item())
-        total_top5 += top5_accuracy(logits, labels)
+        total_top1_combined += top1
+        total_top5_combined += top5
+        total_top1_clean += top1_clean_br if not train else 0.0
+        total_top1_healed += top1_healed_br if not train else 0.0
         batch_count += 1
 
     batch_count = max(batch_count, 1)
-    return total_loss / batch_count, total_top1 / batch_count, total_top5 / batch_count
+    if train:
+        return (
+            total_loss / batch_count,
+            total_top1_combined / batch_count,
+            total_top5_combined / batch_count,
+            float("nan"),
+            float("nan"),
+        )
+    return (
+        total_loss / batch_count,
+        total_top1_combined / batch_count,
+        total_top5_combined / batch_count,
+        total_top1_clean / batch_count,
+        total_top1_healed / batch_count,
+    )
 
 
 def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str, List[float]]:
@@ -128,10 +169,20 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
     mean = dataset_cfg.get("mean", [0.5071, 0.4865, 0.4409])
     std = dataset_cfg.get("std", [0.2673, 0.2564, 0.2761])
 
+    clean_mix_prob = float(classifier_cfg.get("clean_input_mix_prob", 0.5))
+    phase1_epochs = int(classifier_cfg.get("phase1_epochs", 10))
+    phase2_epochs = int(classifier_cfg.get("phase2_epochs", 40))
+    head_lr = float(classifier_cfg.get("head_learning_rate", 1e-3))
+    finetune_lr = float(classifier_cfg.get("learning_rate", 1e-4))
+    patience = int(classifier_cfg.get("patience", 7))
+    min_epochs_before_early_stop = int(classifier_cfg.get("min_epochs_before_early_stop", patience))
+    target_train_acc = float(classifier_cfg.get("target_train_acc", 0.8))
+
     train_loader, val_loader, _ = get_dataloaders(config)
 
     vae = ConvVAE(latent_dim=int(config.get("vae", {}).get("latent_dim", 256))).to(device)
-    vae.load_state_dict(torch.load("models/conv_vae_best.pth", map_location=device))
+    root_dir = Path(config_path).resolve().parent.parent
+    vae.load_state_dict(torch.load(str(root_dir / "models/conv_vae_best.pth"), map_location=device))
     vae.eval()
     for param in vae.parameters():
         param.requires_grad = False
@@ -139,8 +190,8 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
     classifier = get_classifier(config).to(device)
     criterion = nn.CrossEntropyLoss()
 
-    models_dir = Path("models")
-    results_dir = Path("outputs/results")
+    models_dir = root_dir / "models"
+    results_dir = root_dir / "outputs/results"
     models_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -148,17 +199,19 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
     best_val_acc = 0.0
     best_path = models_dir / "resnet_classifier.pth"
 
-    patience = int(classifier_cfg.get("patience", 7))
     patience_counter = 0
     global_epoch = 0
 
-    # Phase 1: frozen backbone.
     classifier.freeze_backbone()
-    optimizer = AdamW(filter(lambda p: p.requires_grad, classifier.parameters()), lr=1e-3, weight_decay=1e-4)
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, classifier.parameters()),
+        lr=head_lr,
+        weight_decay=1e-4,
+    )
 
-    for epoch in range(1, 11):
+    for epoch in range(1, phase1_epochs + 1):
         global_epoch += 1
-        train_loss, train_acc, train_top5 = run_classifier_epoch(
+        train_loss, train_acc, train_top5, _, _ = run_classifier_epoch(
             classifier,
             vae,
             train_loader,
@@ -168,10 +221,11 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
             mean,
             std,
             train=True,
-            phase_label=f"Phase 1 Train {epoch}/10",
+            phase_label=f"Phase 1 Train {epoch}/{phase1_epochs}",
+            clean_mix_prob=clean_mix_prob,
         )
         with torch.no_grad():
-            val_loss, val_acc, val_top5 = run_classifier_epoch(
+            val_loss, val_acc, val_top5, val_clean_acc, val_healed_acc = run_classifier_epoch(
                 classifier,
                 vae,
                 val_loader,
@@ -181,13 +235,15 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
                 mean,
                 std,
                 train=False,
-                phase_label=f"Phase 1 Val {epoch}/10",
+                phase_label=f"Phase 1 Val {epoch}/{phase1_epochs}",
+                clean_mix_prob=clean_mix_prob,
             )
 
         lr = float(optimizer.param_groups[0]["lr"])
         print(
-            f"Phase 1 | Epoch {epoch}/10 | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
+            f"Phase 1 | Epoch {epoch}/{phase1_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f} | Val Acc (avg): {val_acc:.4f} | Val Clean: {val_clean_acc:.4f} | "
+            f"Val Healed: {val_healed_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
         )
 
         history_rows.append(
@@ -200,6 +256,8 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
                 "train_top5_acc": train_top5,
                 "val_loss": val_loss,
                 "val_acc": val_acc,
+                "val_acc_clean": val_clean_acc,
+                "val_acc_healed": val_healed_acc,
                 "val_top5_acc": val_top5,
                 "lr": lr,
             }
@@ -212,19 +270,26 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
         else:
             patience_counter += 1
 
-        if patience_counter >= patience:
-            print(f"Early stopping triggered in Phase 1 at epoch {epoch}.")
+        if (
+            epoch >= min_epochs_before_early_stop
+            and patience_counter >= patience
+            and train_acc >= target_train_acc
+        ):
+            print(
+                f"Early stopping in Phase 1 at epoch {epoch}: "
+                f"patience={patience}, train_acc={train_acc:.4f} (target={target_train_acc:.4f})."
+            )
             break
 
-    # Phase 2: full fine-tuning.
     if patience_counter < patience:
+        patience_counter = 0
         classifier.unfreeze_backbone()
-        optimizer = AdamW(classifier.parameters(), lr=1e-4, weight_decay=1e-4)
-        scheduler = CosineAnnealingLR(optimizer, T_max=40)
+        optimizer = AdamW(classifier.parameters(), lr=finetune_lr, weight_decay=1e-4)
+        scheduler = CosineAnnealingLR(optimizer, T_max=phase2_epochs)
 
-        for epoch in range(1, 41):
+        for epoch in range(1, phase2_epochs + 1):
             global_epoch += 1
-            train_loss, train_acc, train_top5 = run_classifier_epoch(
+            train_loss, train_acc, train_top5, _, _ = run_classifier_epoch(
                 classifier,
                 vae,
                 train_loader,
@@ -234,10 +299,11 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
                 mean,
                 std,
                 train=True,
-                phase_label=f"Phase 2 Train {epoch}/40",
+                phase_label=f"Phase 2 Train {epoch}/{phase2_epochs}",
+                clean_mix_prob=clean_mix_prob,
             )
             with torch.no_grad():
-                val_loss, val_acc, val_top5 = run_classifier_epoch(
+                val_loss, val_acc, val_top5, val_clean_acc, val_healed_acc = run_classifier_epoch(
                     classifier,
                     vae,
                     val_loader,
@@ -247,15 +313,17 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
                     mean,
                     std,
                     train=False,
-                    phase_label=f"Phase 2 Val {epoch}/40",
+                    phase_label=f"Phase 2 Val {epoch}/{phase2_epochs}",
+                    clean_mix_prob=clean_mix_prob,
                 )
 
             lr = float(optimizer.param_groups[0]["lr"])
             scheduler.step()
 
             print(
-                f"Phase 2 | Epoch {epoch}/40 | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
+                f"Phase 2 | Epoch {epoch}/{phase2_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+                f"Val Loss: {val_loss:.4f} | Val Acc (avg): {val_acc:.4f} | Val Clean: {val_clean_acc:.4f} | "
+                f"Val Healed: {val_healed_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
             )
 
             history_rows.append(
@@ -268,6 +336,8 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
                     "train_top5_acc": train_top5,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
+                    "val_acc_clean": val_clean_acc,
+                    "val_acc_healed": val_healed_acc,
                     "val_top5_acc": val_top5,
                     "lr": lr,
                 }
@@ -280,12 +350,19 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
             else:
                 patience_counter += 1
 
-            if patience_counter >= patience:
-                print(f"Early stopping triggered in Phase 2 at epoch {epoch}.")
+            if (
+                epoch >= min_epochs_before_early_stop
+                and patience_counter >= patience
+                and train_acc >= target_train_acc
+            ):
+                print(
+                    f"Early stopping in Phase 2 at epoch {epoch}: "
+                    f"patience={patience}, train_acc={train_acc:.4f} (target={target_train_acc:.4f})."
+                )
                 break
 
     pd.DataFrame(history_rows).to_csv(results_dir / "classifier_history.csv", index=False)
-    print(f"Best validation accuracy: {best_val_acc * 100:.2f}%")
+    print(f"Best validation accuracy (avg clean/healed): {best_val_acc * 100:.2f}%")
     print("Model saved: models/resnet_classifier.pth")
 
     return {

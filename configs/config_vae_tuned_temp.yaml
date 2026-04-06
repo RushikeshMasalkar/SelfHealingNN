@@ -1,0 +1,67 @@
+dataset:
+  name: cifar100
+  root: ./data/raw/
+  download: auto
+  image_size: 32
+  num_classes: 100
+  mean:
+  - 0.5071
+  - 0.4865
+  - 0.4409
+  std:
+  - 0.2673
+  - 0.2564
+  - 0.2761
+  train_split: 0.9
+noise:
+  types:
+  - gaussian
+  - salt_pepper
+  - occlusion
+  gaussian_std: 0.15
+  salt_pepper_prob: 0.05
+  occlusion_size: 8
+evaluation:
+  gaussian_stress_levels:
+  - 0.1
+  - 0.2
+  - 0.3
+  - 0.5
+  - 0.7
+vae:
+  latent_dim: 256
+  encoder_channels:
+  - 32
+  - 64
+  - 128
+  - 256
+  beta: 0.08
+  beta_warmup_epochs: 30
+  learning_rate: 0.001
+  epochs: 20
+  batch_size: 64
+  patience: 8
+  augment_train: false
+  noise_types:
+  - gaussian
+  - salt_pepper
+  gaussian_std: 0.12
+  salt_pepper_prob: 0.03
+  occlusion_size: 8
+classifier:
+  backbone: resnet18
+  pretrained: true
+  learning_rate: 0.0001
+  head_learning_rate: 0.001
+  clean_input_mix_prob: 0.5
+  phase1_epochs: 10
+  phase2_epochs: 40
+  batch_size: 64
+  patience: 7
+  dropout: 0.3
+training:
+  device: cuda
+  num_workers: 2
+  pin_memory: auto
+  save_every: 5
+  seed: 42
