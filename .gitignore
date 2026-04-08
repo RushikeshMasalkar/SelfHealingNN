@@ -2,7 +2,7 @@ data/raw/*
 !data/raw/.gitkeep
 notebooks/data/raw/
 data/processed/
-models/*.pth
+models/**/*.pth
 __pycache__/
 .ipynb_checkpoints/
 node_modules/

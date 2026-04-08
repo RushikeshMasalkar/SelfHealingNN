@@ -30,7 +30,7 @@ class CIFAR100Classifier(nn.Module):
 
     def freeze_backbone(self) -> None:
         for name, param in self.backbone.named_parameters():
-            param.requires_grad = name.startswith("fc.")
+            param.requires_grad = name.startswith("fc.") or name.startswith("conv1.")
 
     def unfreeze_backbone(self) -> None:
         for param in self.backbone.parameters():

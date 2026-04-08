@@ -100,12 +100,17 @@ def run_classifier_epoch(
 
         with torch.set_grad_enabled(train):
             if train:
+                # Mixing clean and VAE-healed images (clean_mix_prob should be 0.5)
                 batch_size = clean.size(0)
                 use_clean = torch.rand(batch_size, device=device) < float(clean_mix_prob)
                 mask = use_clean.view(-1, 1, 1, 1).expand_as(clean)
                 classifier_input = torch.where(mask, clean, cleaned)
+                
+                # Forward with mixed batch
                 logits = classifier(classifier_input)
                 loss = criterion(logits, labels)
+                
+                # Optimization step
                 if train:
                     loss.backward()
                     optimizer.step()
@@ -281,87 +286,89 @@ def train_classifier_model(config_path: str = "configs/config.yaml") -> Dict[str
             )
             break
 
-    if patience_counter < patience:
-        patience_counter = 0
-        classifier.unfreeze_backbone()
-        optimizer = AdamW(classifier.parameters(), lr=finetune_lr, weight_decay=1e-4)
-        scheduler = CosineAnnealingLR(optimizer, T_max=phase2_epochs)
+    # Load the best Phase 1 checkpoint before fine-tuning in Phase 2
+    if best_path.exists():
+        classifier.load_state_dict(torch.load(best_path, map_location=device))
 
-        for epoch in range(1, phase2_epochs + 1):
-            global_epoch += 1
-            train_loss, train_acc, train_top5, _, _ = run_classifier_epoch(
+    patience_counter = 0
+    classifier.unfreeze_backbone()
+    optimizer = AdamW(classifier.parameters(), lr=finetune_lr, weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=phase2_epochs)
+
+    for epoch in range(1, phase2_epochs + 1):
+        global_epoch += 1
+        train_loss, train_acc, train_top5, _, _ = run_classifier_epoch(
+            classifier,
+            vae,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            mean,
+            std,
+            train=True,
+            phase_label=f"Phase 2 Train {epoch}/{phase2_epochs}",
+            clean_mix_prob=clean_mix_prob,
+        )
+        with torch.no_grad():
+            val_loss, val_acc, val_top5, val_clean_acc, val_healed_acc = run_classifier_epoch(
                 classifier,
                 vae,
-                train_loader,
+                val_loader,
                 criterion,
                 optimizer,
                 device,
                 mean,
                 std,
-                train=True,
-                phase_label=f"Phase 2 Train {epoch}/{phase2_epochs}",
+                train=False,
+                phase_label=f"Phase 2 Val {epoch}/{phase2_epochs}",
                 clean_mix_prob=clean_mix_prob,
             )
-            with torch.no_grad():
-                val_loss, val_acc, val_top5, val_clean_acc, val_healed_acc = run_classifier_epoch(
-                    classifier,
-                    vae,
-                    val_loader,
-                    criterion,
-                    optimizer,
-                    device,
-                    mean,
-                    std,
-                    train=False,
-                    phase_label=f"Phase 2 Val {epoch}/{phase2_epochs}",
-                    clean_mix_prob=clean_mix_prob,
-                )
 
-            lr = float(optimizer.param_groups[0]["lr"])
-            scheduler.step()
+        lr = float(optimizer.param_groups[0]["lr"])
+        scheduler.step()
 
+        print(
+            f"Phase 2 | Epoch {epoch}/{phase2_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+            f"Val Loss: {val_loss:.4f} | Val Acc (avg): {val_acc:.4f} | Val Clean: {val_clean_acc:.4f} | "
+            f"Val Healed: {val_healed_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
+        )
+
+        history_rows.append(
+            {
+                "epoch": global_epoch,
+                "phase": 2,
+                "phase_epoch": epoch,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "train_top5_acc": train_top5,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "val_acc_clean": val_clean_acc,
+                "val_acc_healed": val_healed_acc,
+                "val_top5_acc": val_top5,
+                "lr": lr,
+            }
+        )
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            patience_counter = 0
+            torch.save(classifier.state_dict(), best_path)
+        else:
+            patience_counter += 1
+
+        if (
+            epoch >= min_epochs_before_early_stop
+            and patience_counter >= patience
+            and train_acc >= target_train_acc
+        ):
             print(
-                f"Phase 2 | Epoch {epoch}/{phase2_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                f"Val Loss: {val_loss:.4f} | Val Acc (avg): {val_acc:.4f} | Val Clean: {val_clean_acc:.4f} | "
-                f"Val Healed: {val_healed_acc:.4f} | Val Top5: {val_top5:.4f} | LR: {lr:.6f}"
+                f"Early stopping in Phase 2 at epoch {epoch}: "
+                f"patience={patience}, train_acc={train_acc:.4f} (target={target_train_acc:.4f})."
             )
+            break
 
-            history_rows.append(
-                {
-                    "epoch": global_epoch,
-                    "phase": 2,
-                    "phase_epoch": epoch,
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
-                    "train_top5_acc": train_top5,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "val_acc_clean": val_clean_acc,
-                    "val_acc_healed": val_healed_acc,
-                    "val_top5_acc": val_top5,
-                    "lr": lr,
-                }
-            )
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                patience_counter = 0
-                torch.save(classifier.state_dict(), best_path)
-            else:
-                patience_counter += 1
-
-            if (
-                epoch >= min_epochs_before_early_stop
-                and patience_counter >= patience
-                and train_acc >= target_train_acc
-            ):
-                print(
-                    f"Early stopping in Phase 2 at epoch {epoch}: "
-                    f"patience={patience}, train_acc={train_acc:.4f} (target={target_train_acc:.4f})."
-                )
-                break
-
-    pd.DataFrame(history_rows).to_csv(results_dir / "classifier_history.csv", index=False)
     print(f"Best validation accuracy (avg clean/healed): {best_val_acc * 100:.2f}%")
     print("Model saved: models/resnet_classifier.pth")
 

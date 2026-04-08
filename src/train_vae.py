@@ -246,7 +246,6 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
             break
 
     torch.save(vae.state_dict(), last_path)
-    pd.DataFrame(history_rows).to_csv(results_dir / "vae_history.csv", index=False)
 
     print("Training complete!")
     print(f"Best Val Loss: {best_val_loss:.4f} at Epoch {best_epoch}")

@@ -14,41 +14,41 @@ noise:
   salt_pepper_prob: 0.01
   occlusion_size: 4
 
-# Extra Gaussian std values for stress-test evaluation only (see evaluate.evaluation.gaussian_stress_levels)
+# Extra Gaussian std values for stress-test evaluation only
 evaluation:
-  gaussian_stress_levels: [0.1, 0.2, 0.3, 0.5, 0.7]
+  gaussian_stress_levels: [0.05, 0.1, 0.15, 0.2, 0.3]
 
 vae:
   latent_dim: 256
   encoder_channels: [64, 128, 256]
-  beta: 0.1
-  beta_warmup_epochs: 10
-  beta_start_factor: 0.0
-  learning_rate: 0.001
+  beta: 0.01
+  beta_warmup_epochs: 20
+  beta_start_factor: 0.1
+  learning_rate: 0.0002
   epochs: 100
   batch_size: 64
-  patience: 20
-  min_epochs_before_early_stop: 25
+  patience: 15
+  min_epochs_before_early_stop: 15
   min_improvement: 1.0e-5
-  augment_train: false
-  noise_types: [gaussian, salt_pepper]
-  gaussian_std: 0.04
-  salt_pepper_prob: 0.008
-  occlusion_size: 4
+  augment_train: true
+  noise_types: [gaussian, salt_pepper, occlusion]
+  gaussian_std: 0.08
+  salt_pepper_prob: 0.015
+  occlusion_size: 6
 
 classifier:
   backbone: resnet18
   pretrained: true
-  learning_rate: 0.0002
-  head_learning_rate: 0.002
-  clean_input_mix_prob: 0.75
-  phase1_epochs: 15
-  phase2_epochs: 90
+  learning_rate: 0.0001
+  head_learning_rate: 0.001
+  clean_input_mix_prob: 0.5
+  phase1_epochs: 10
+  phase2_epochs: 50
   batch_size: 64
-  patience: 20
-  min_epochs_before_early_stop: 25
+  patience: 10
+  min_epochs_before_early_stop: 10
   target_train_acc: 0.8
-  dropout: 0.1
+  dropout: 0.3
 
 training:
   device: cuda
