@@ -10,9 +10,9 @@ dataset:
 
 noise:
   types: [gaussian, salt_pepper, occlusion]
-  gaussian_std: 0.05
-  salt_pepper_prob: 0.01
-  occlusion_size: 4
+  gaussian_std: 0.03
+  salt_pepper_prob: 0.005
+  occlusion_size: 3
 
 # Extra Gaussian std values for stress-test evaluation only
 evaluation:
