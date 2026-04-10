@@ -154,22 +154,11 @@ class NoiseInjector:
         noisy[pepper_mask] = 0.0
         return noisy
 
-    def occlusion(self, image: torch.Tensor, patch_size: int = 8) -> torch.Tensor:
-        noisy = image.clone()
-        _, height, width = noisy.shape
-        patch = min(patch_size, height, width)
-        top = random.randint(0, height - patch)
-        left = random.randint(0, width - patch)
-        noisy[:, top : top + patch, left : left + patch] = 0.0
-        return noisy
-
     def inject(self, image: torch.Tensor, noise_type: str = "gaussian", **kwargs) -> torch.Tensor:
         if noise_type == "gaussian":
             return self.gaussian_noise(image, std=kwargs.get("std", 0.3))
         if noise_type == "salt_pepper":
             return self.salt_pepper(image, prob=kwargs.get("prob", 0.05))
-        if noise_type == "occlusion":
-            return self.occlusion(image, patch_size=kwargs.get("patch_size", 8))
         raise ValueError(f"Unsupported noise_type: {noise_type}")
 
 
@@ -209,7 +198,6 @@ class NoisyCIFAR100(Dataset):
             noise_type=noise_type,
             std=self.noise_params.get("gaussian_std", 0.3),
             prob=self.noise_params.get("salt_pepper_prob", 0.05),
-            patch_size=int(self.noise_params.get("occlusion_size", 8)),
         )
 
         noisy_image = normalize_tensor(noisy_pixel, self.mean, self.std)
@@ -302,7 +290,6 @@ def get_dataloaders(
     noise_params = {
         "gaussian_std": float(noise_cfg.get("gaussian_std", 0.3)),
         "salt_pepper_prob": float(noise_cfg.get("salt_pepper_prob", 0.05)),
-        "occlusion_size": int(noise_cfg.get("occlusion_size", 8)),
     }
     if noise_params_override:
         noise_params.update(noise_params_override)
@@ -310,7 +297,7 @@ def get_dataloaders(
     if noise_types_override is not None:
         noise_types = list(noise_types_override)
     else:
-        noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper", "occlusion"]))
+        noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper"]))
 
     train_dataset = NoisyCIFAR100(train_subset, noise_types=noise_types, noise_params=noise_params, mean=mean, std=std)
     val_dataset = NoisyCIFAR100(val_subset, noise_types=noise_types, noise_params=noise_params, mean=mean, std=std)

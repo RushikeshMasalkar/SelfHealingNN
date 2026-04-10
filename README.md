@@ -22,7 +22,7 @@
 
 ## Abstract
 
-This project presents a **Self-Healing Neural Network** for **CIFAR-100** (32×32 RGB, 100 classes). Traditional CNNs degrade when inputs are corrupted by noise, occlusion, or artifacts. The pipeline first reconstructs corrupted images with a **ConvVAE** (trained on noisy→clean pairs), then classifies either **true clean** or **VAE outputs** using a **ResNet-18** with a CIFAR-friendly stem (3×3 stride-1 conv, no initial max-pool). Classifier training **mixes** normalized clean images with VAE-healed images so evaluation on the clean branch is not out-of-distribution.
+This project presents a **Self-Healing Neural Network** for **CIFAR-100** (32×32 RGB, 100 classes). Traditional CNNs degrade when inputs are corrupted by noise or artifacts. The pipeline first reconstructs corrupted images with a **ConvVAE** (trained on noisy→clean pairs), then classifies either **true clean** or **VAE outputs** using a **ResNet-18** with a CIFAR-friendly stem (3×3 stride-1 conv, no initial max-pool). Classifier training **mixes** normalized clean images with VAE-healed images so evaluation on the clean branch is not out-of-distribution.
 
 **Metrics:** After training, see `outputs/results/final_metrics.csv` (per-protocol rows), `evaluation_summary.json`, and confusion-matrix `.npy`/`.png` files. The notebook `05_Evaluation_and_Results.ipynb` plots **train-matched** noise (from `configs/config.yaml`) and a separate **Gaussian stress** sweep.
 
@@ -33,7 +33,7 @@ This project presents a **Self-Healing Neural Network** for **CIFAR-100** (32×3
 | Feature | Description |
 |---------|-------------|
 | **Two-Stage Pipeline** | ConvVAE healer + ResNet-18 classifier working in tandem |
-| **Multiple Noise Types** | Handles Gaussian, Salt & Pepper, Block Occlusion, and mixed noise |
+| **Multiple Noise Types** | Handles Gaussian, Salt & Pepper, and mixed noise |
 | **Honest evaluation** | Train-matched noise types + optional Gaussian stress sweep; macro-F1, ECE, confusion matrices in `outputs/results/` |
 | **Real-time Inference** | ~45ms per image on RTX 3050 GPU |
 | **Interactive Web Demo** | Modern React 18 frontend with live image upload and visualization |
@@ -148,8 +148,7 @@ CIFAR-100 fine labels include `apple`, `aquarium_fish`, `baby`, `bear`, … (see
 |------------|------------|---------------|
 | **Gaussian** | σ = 0.1, 0.2, 0.3 | Additive white noise across all pixels |
 | **Salt & Pepper** | p = 0.05, 0.1, 0.15 | Random black/white pixel replacement |
-| **Block Occlusion** | size = 32×32, 56×56, 84×84 | Random rectangular region set to zero |
-| **Mixed** | Combination of above | Real-world corruption simulation |
+| **Mixed** | Combination of the above noise types | Real-world corruption simulation |
 
 ---
 
@@ -372,10 +371,9 @@ dataset:
   train_split: 0.9
 
 noise:
-  types: [gaussian, salt_pepper, occlusion]
+  types: [gaussian, salt_pepper]
   gaussian_std: 0.15
   salt_pepper_prob: 0.05
-  occlusion_size: 8
 
 evaluation:
   gaussian_stress_levels: [0.1, 0.2, 0.3, 0.5, 0.7]
@@ -422,7 +420,6 @@ injector = NoiseInjector()
 # Apply different noise types
 noisy = injector.add_gaussian_noise(image, std=0.2)
 noisy = injector.add_salt_pepper(image, prob=0.1)
-noisy = injector.add_occlusion(image, patch_size=56)
 ```
 
 ---

@@ -43,12 +43,10 @@ def corrupt_batch_pixels(
     injector: NoiseInjector,
     gaussian_std: float,
     salt_pepper_prob: float,
-    occlusion_size: int,
 ) -> torch.Tensor:
     kwargs = {
         "gaussian": {"std": gaussian_std},
         "salt_pepper": {"prob": salt_pepper_prob},
-        "occlusion": {"patch_size": occlusion_size},
     }[noise_type]
     out = []
     for i in range(clean_pixel.size(0)):
@@ -343,8 +341,7 @@ def evaluate_pipeline(
 
     gaussian_std = float(noise_cfg.get("gaussian_std", 0.15))
     salt_pepper_prob = float(noise_cfg.get("salt_pepper_prob", 0.05))
-    occlusion_size = int(noise_cfg.get("occlusion_size", 8))
-    noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper", "occlusion"]))
+    noise_types = list(noise_cfg.get("types", ["gaussian", "salt_pepper"]))
 
     stress_levels = list(noise_levels) if noise_levels is not None else list(
         eval_cfg.get("gaussian_stress_levels", [0.1, 0.2, 0.3, 0.5, 0.7])
@@ -402,7 +399,7 @@ def evaluate_pipeline(
         elif nt == "salt_pepper":
 
             def fn_sp(cp: torch.Tensor) -> torch.Tensor:
-                return corrupt_batch_pixels(cp, "salt_pepper", injector, gaussian_std, salt_pepper_prob, occlusion_size)
+                return corrupt_batch_pixels(cp, "salt_pepper", injector, gaussian_std, salt_pepper_prob)
 
             rows, cm = _evaluate_corruption_setting(
                 vae,
@@ -415,30 +412,6 @@ def evaluate_pipeline(
                 protocol="train_matched",
                 noise_type_label="salt_pepper",
                 severity_label=f"prob={salt_pepper_prob}",
-                collect_matrix_key=collect_h,
-            )
-            if train_matched_healed_cm_pending and cm:
-                train_matched_healed_cm_pending = False
-            all_rows.extend(rows)
-            if cm:
-                confusion_to_save.append(cm)
-
-        elif nt == "occlusion":
-
-            def fn_occ(cp: torch.Tensor) -> torch.Tensor:
-                return corrupt_batch_pixels(cp, "occlusion", injector, gaussian_std, salt_pepper_prob, occlusion_size)
-
-            rows, cm = _evaluate_corruption_setting(
-                vae,
-                classifier,
-                test_loader,
-                mean,
-                std,
-                dev,
-                fn_occ,
-                protocol="train_matched",
-                noise_type_label="occlusion",
-                severity_label=f"patch={occlusion_size}",
                 collect_matrix_key=collect_h,
             )
             if train_matched_healed_cm_pending and cm:

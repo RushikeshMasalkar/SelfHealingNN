@@ -128,7 +128,6 @@ def train_vae_model(config_path: str = "configs/config.yaml") -> Dict[str, List[
     vae_noise_params = {
         "gaussian_std": float(vae_cfg.get("gaussian_std", config.get("noise", {}).get("gaussian_std", 0.15))),
         "salt_pepper_prob": float(vae_cfg.get("salt_pepper_prob", config.get("noise", {}).get("salt_pepper_prob", 0.05))),
-        "occlusion_size": int(vae_cfg.get("occlusion_size", config.get("noise", {}).get("occlusion_size", 8))),
     }
 
     train_loader, val_loader, _ = get_dataloaders(

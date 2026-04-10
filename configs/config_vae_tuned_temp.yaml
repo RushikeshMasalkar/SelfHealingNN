@@ -17,10 +17,8 @@ noise:
   types:
   - gaussian
   - salt_pepper
-  - occlusion
   gaussian_std: 0.15
   salt_pepper_prob: 0.05
-  occlusion_size: 8
 evaluation:
   gaussian_stress_levels:
   - 0.1
@@ -47,7 +45,6 @@ vae:
   - salt_pepper
   gaussian_std: 0.12
   salt_pepper_prob: 0.03
-  occlusion_size: 8
 classifier:
   backbone: resnet18
   pretrained: true
