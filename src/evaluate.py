@@ -124,17 +124,16 @@ def save_comparison_grid(
 ) -> None:
     n = min(8, originals.size(0))
 
-    fig, axes = plt.subplots(4, n, figsize=(2 * n, 8))
-    row_titles = ["Original", "Noisy", "Reconstructed", "Difference"]
+    fig, axes = plt.subplots(3, n, figsize=(2 * n, 6))
+    row_titles = ["Original", "Noisy", "Reconstructed"]
 
     for i in range(n):
         original = originals[i].detach().cpu().permute(1, 2, 0).numpy()
         noisy_img = noisy[i].detach().cpu().permute(1, 2, 0).numpy()
         recon = reconstructed[i].detach().cpu().permute(1, 2, 0).numpy()
-        diff = np.abs(original - recon)
 
-        images = [original, noisy_img, recon, diff]
-        for row in range(4):
+        images = [original, noisy_img, recon]
+        for row in range(3):
             axes[row, i].imshow(images[row])
             axes[row, i].axis("off")
             if i == 0:
@@ -366,13 +365,14 @@ def evaluate_pipeline(
         noise_type_label="none",
         severity_label="identity",
         collect_matrix_key="clean",
-        save_preview=True,
+        save_preview=False,
     )
     all_rows.extend(rows_baseline)
     if cm_clean:
         confusion_to_save.append(cm_clean)
 
     train_matched_healed_cm_pending = True
+    preview_saved = False
     for nt in noise_types:
         collect_h = "healed" if train_matched_healed_cm_pending else None
         if nt == "gaussian":
@@ -389,7 +389,9 @@ def evaluate_pipeline(
                 noise_type_label="gaussian",
                 severity_label=f"std={gaussian_std}",
                 collect_matrix_key=collect_h,
+                save_preview=not preview_saved,
             )
+            preview_saved = True
             if train_matched_healed_cm_pending and cm:
                 train_matched_healed_cm_pending = False
             all_rows.extend(rows)
@@ -413,7 +415,9 @@ def evaluate_pipeline(
                 noise_type_label="salt_pepper",
                 severity_label=f"prob={salt_pepper_prob}",
                 collect_matrix_key=collect_h,
+                save_preview=not preview_saved,
             )
+            preview_saved = True
             if train_matched_healed_cm_pending and cm:
                 train_matched_healed_cm_pending = False
             all_rows.extend(rows)
