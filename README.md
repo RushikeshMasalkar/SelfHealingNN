@@ -1,442 +1,70 @@
-<div align="center">
-
 # Self-Healing Neural Network
 
-### Robust Image Classification Under Severe Corruption
+Robust image classification for CIFAR-100 using a two-stage pipeline: a ConvVAE restores corrupted images, then a ResNet-18 classifier predicts the class from the healed output.
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1.0-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
-[![React](https://img.shields.io/badge/React-18.2-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
-[![TailwindCSS](https://img.shields.io/badge/Tailwind-3.4-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![License](https://img.shields.io/badge/License-MIT-16A34A?style=for-the-badge)](LICENSE)
+[Python 3.10+](https://python.org) [![PyTorch](https://img.shields.io/badge/PyTorch-2.1.0-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org) [![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev) [![TailwindCSS](https://img.shields.io/badge/Tailwind-3.4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com) [![License](https://img.shields.io/badge/License-MIT-16A34A?style=flat-square)](LICENSE)
 
-<p align="center">
-  <strong>A two-stage deep learning pipeline that restores corrupted CIFAR-100 images (32×32) using a Convolutional VAE before classification with a ResNet-18 adapted for small inputs. Reported numbers below are illustrative—always use your own <code>outputs/results/</code> after training.</strong>
-</p>
+## Overview
 
-[Features](#-key-features) | [Architecture](#-architecture) | [Results](#-experimental-results) | [Installation](#-installation) | [Demo](#-web-demo) | [Documentation](#-documentation)
+The repository contains:
 
----
+- a Python pipeline for noisy image healing and classification in [src/pipeline.py](src/pipeline.py)
+- training entry points for the VAE and classifier in [src/train_vae.py](src/train_vae.py) and [src/train_classifier.py](src/train_classifier.py)
+- an evaluation module that reports accuracy, top-5 accuracy, macro F1, ECE, PSNR, and SSIM in [src/evaluate.py](src/evaluate.py)
+- a small Express backend and React/Vite frontend for the web demo in [web/backend/server.js](web/backend/server.js) and [web/frontend/src/App.jsx](web/frontend/src/App.jsx)
 
-</div>
-
-## Abstract
-
-This project presents a **Self-Healing Neural Network** for **CIFAR-100** (32×32 RGB, 100 classes). Traditional CNNs degrade when inputs are corrupted by noise or artifacts. The pipeline first reconstructs corrupted images with a **ConvVAE** (trained on noisy→clean pairs), then classifies either **true clean** or **VAE outputs** using a **ResNet-18** with a CIFAR-friendly stem (3×3 stride-1 conv, no initial max-pool). Classifier training **mixes** normalized clean images with VAE-healed images so evaluation on the clean branch is not out-of-distribution.
-
-**Metrics:** After training, see `outputs/results/final_metrics.csv` (per-protocol rows), `evaluation_summary.json`, and confusion-matrix `.npy`/`.png` files. The notebook `05_Evaluation_and_Results.ipynb` plots **train-matched** noise (from `configs/config.yaml`) and a separate **Gaussian stress** sweep.
-
----
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Two-Stage Pipeline** | ConvVAE healer + ResNet-18 classifier working in tandem |
-| **Multiple Noise Types** | Handles Gaussian, Salt & Pepper, and mixed noise |
-| **Honest evaluation** | Train-matched noise types + optional Gaussian stress sweep; macro-F1, ECE, confusion matrices in `outputs/results/` |
-| **Real-time Inference** | ~45ms per image on RTX 3050 GPU |
-| **Interactive Web Demo** | Modern React 18 frontend with live image upload and visualization |
-| **Comprehensive Notebooks** | 5 Jupyter notebooks for training, evaluation, and visualization |
-| **Production Ready** | Modular codebase with config-driven training and inference |
-
----
+The default dataset is CIFAR-100. Dataset paths are resolved from the repository root, so notebooks and scripts can be run from different working directories without creating duplicate data folders.
 
 ## Architecture
 
-### System Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        SELF-HEALING NEURAL NETWORK                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│    ┌──────────────┐     ┌──────────────────┐     ┌───────────────────┐     │
-│    │   INPUT      │     │   STAGE A        │     │   STAGE B         │     │
-│    │   IMAGE      │────▶│   ConvVAE        │────▶│   ResNet-18       │     │
-│    │  (Corrupted) │     │   (Healer)       │     │   (Classifier)    │     │
-│    └──────────────┘     └──────────────────┘     └───────────────────┘     │
-│          │                      │                         │                 │
-│          │                      │                         │                 │
-│          ▼                      ▼                         ▼                 │
-│    ┌──────────────┐     ┌──────────────────┐     ┌───────────────────┐     │
-│    │  32×32×3     │     │  Reconstructed   │     │  100-class        │     │
-│    │  RGB Image   │     │  Clean Image     │     │  Prediction       │     │
-│    └──────────────┘     └──────────────────┘     └───────────────────┘     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Stage A: Convolutional VAE (Healer)
-
-The ConvVAE learns to reconstruct clean images from corrupted inputs by mapping them to a compressed latent space and decoding back to image space.
-
-```
-ENCODER                              DECODER
-┌─────────────────┐                  ┌─────────────────┐
-│ Input: 32×32×3  │                  │ Latent: 128-dim │
-├─────────────────┤                  ├─────────────────┤
-│ Conv2d(3→64)    │                  │ FC(128→4096)    │
-│ BatchNorm + ReLU│                  │ Reshape(256,4,4)│
-│ Conv2d(64→128)  │                  │ ConvT(256→128)  │
-│ BatchNorm + ReLU│                  │ BatchNorm + ReLU│
-│ Conv2d(128→256) │                  │ ConvT(128→64)   │
-│ BatchNorm + ReLU│                  │ BatchNorm + ReLU│
-│ Flatten         │                  │ ConvT(64→32)    │
-│ FC → μ, log(σ²) │                  │ Conv(32→3)      │
-└────────┬────────┘                  └────────▲────────┘
-         │                                    │
-         │         ┌─────────────┐            │
-         └────────▶│ z = μ + σε  │────────────┘
-                   │ (Reparam.)  │
-                   └─────────────┘
-```
-
-| Component | Specification |
-|-----------|---------------|
-| Input Resolution | 32 × 32 × 3 (CIFAR-100) |
-| Encoder Layers | 3 Conv blocks (64→128→256 channels) |
-| Latent Dimension | 128 (default in `configs/config.yaml`) |
-| Decoder Layers | 3 ConvTranspose blocks + 1 Conv |
-| Loss Function | L1/MSE Reconstruction + β-KL Divergence (β=0.015) |
-| Optimizer | AdamW (lr=0.0005) |
-| Training Epochs | 100 (with early stopping; β linear warmup optional via `vae.beta_warmup_epochs`) |
-
-### Stage B: ResNet-18 Classifier (Expert)
-
-A pretrained ResNet-18 backbone modified for 32x32 CIFAR-100 images and fine-tuned for robust classification.
-
-| Component | Specification |
-|-----------|---------------|
-| Backbone | ResNet-18 (pretrained on ImageNet-1K) |
-| Feature Dimension | 512 |
-| Output Classes | 100 |
-| Fine-tuning Strategy | Phase 1: frozen backbone + head; Phase 2: full network |
-| Optimizer | AdamW (see `classifier.head_learning_rate` and `classifier.learning_rate` in config) |
-| Scheduler | CosineAnnealingLR (phase 2) |
-| Training | Mixes clean normalized inputs with VAE-healed inputs (`classifier.clean_input_mix_prob`) |
-
----
-
-## Dataset: CIFAR-100
-
-### Overview
-
-CIFAR-100 is a compact benchmark dataset with 100 object classes and 32x32 RGB images, ideal for fast experimentation and GPU training.
-
-| Property | Value |
-|----------|-------|
-| **Source** | torchvision.datasets.CIFAR100 |
-| **Total Images** | 60,000 |
-| **Classes** | 100 |
-| **Dataset Size** | ~170 MB |
-| **Train Split** | 50,000 |
-| **Validation Split** | 10% of train (configurable) |
-| **Test Split** | 10,000 |
-| **Image Resolution** | 32×32 |
-| **Color Space** | RGB |
-| **Normalization** | CIFAR-100 mean/std |
-| **Setup** | Auto-downloads via PyTorch (no manual setup) |
-
-### Sample class names (human-readable)
-
-CIFAR-100 fine labels include `apple`, `aquarium_fish`, `baby`, `bear`, … (see `src/dataset.py` for the full list).
-
-### Noise Types & Parameters
-
-| Noise Type | Parameters | Visual Effect |
-|------------|------------|---------------|
-| **Gaussian** | σ = 0.1, 0.2, 0.3 | Additive white noise across all pixels |
-| **Salt & Pepper** | p = 0.05, 0.1, 0.15 | Random black/white pixel replacement |
-| **Mixed** | Combination of the above noise types | Real-world corruption simulation |
-
----
-
-## Experimental results
-
-Run `python -m src.train_vae`, then `python -m src.train_classifier`, then evaluation from `05_Evaluation_and_Results.ipynb` or by calling `src.evaluate.evaluate_pipeline`.
-
-**`outputs/results/final_metrics.csv`** contains one row per `(protocol, noise_type, severity, condition)` with:
-
-- `protocol`: `train_matched` (severities from `configs/config.yaml`) or `gaussian_stress` (extra Gaussian-only sweep).
-- `condition`: `Clean -> Classifier`, `Noisy -> Classifier`, or `Noisy -> VAE -> Classifier`.
-- `accuracy`, `top5_accuracy`, `macro_f1`, `ece`, `psnr`, `ssim` (PSNR/SSIM where applicable).
-
-**`outputs/results/evaluation_summary.json`** records which protocols and noise settings were used. Confusion matrices for the clean baseline and the first train-matched healed setting are saved as `confusion_matrix_*.npy` and `.png`.
-
-
----
-
-## Web Demo
-
-### Modern React 18 Frontend
-
-Our interactive web demo provides a seamless experience for testing the self-healing pipeline.
-
-#### Features
-
-| Feature | Description |
-|---------|-------------|
-| **Drag & Drop Upload** | Intuitive image upload with preview |
-| **Real-time Processing** | Live inference with progress indicators |
-| **Side-by-side Comparison** | Original vs. healed image visualization |
-| **Noise Injection** | Apply different noise types interactively |
-| **Confidence Visualization** | Top-5 predictions with probability bars |
-| **Responsive Design** | Mobile-friendly Tailwind CSS layout |
-| **Dark Mode** | System-aware theme switching |
-
-#### Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| **Frontend** | React 18.2 + Vite 5.0 |
-| **Styling** | Tailwind CSS 3.4 + Headless UI |
-| **State Management** | React Context + Hooks |
-| **HTTP Client** | Axios with interceptors |
-| **Charts** | Recharts for metrics visualization |
-| **Backend** | Express.js 4.18 + Node.js 20 |
-| **ML Serving** | Python FastAPI / Flask bridge |
-
-#### Component Architecture
-
-```
-src/
-├── components/
-│   ├── Navbar.jsx          # Navigation with theme toggle
-│   ├── Hero.jsx            # Landing section with CTA
-│   ├── LiveDemo.jsx        # Image upload + inference
-│   ├── Architecture.jsx    # Interactive pipeline diagram
-│   ├── Metrics.jsx         # Results visualization
-│   ├── HowItWorks.jsx      # Step-by-step explanation
-│   ├── TechStack.jsx       # Technology showcase
-│   └── Footer.jsx          # Links and credits
-├── App.jsx                 # Main application shell
-├── main.jsx                # React entry point
-└── index.css               # Tailwind directives
-```
-
-#### Screenshots
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│  Self-Healing Neural Network                    [Demo] [Docs]  │
-├────────────────────────────────────────────────────────────────┤
-│                                                                │
-│   ┌─────────────────┐    ┌─────────────────┐                   │
-│   │                 │    │                 │                   │
-│   │   CORRUPTED     │ ─▶ │    HEALED       │                   │
-│   │    INPUT        │    │    OUTPUT       │                   │
-│   │                 │    │                 │                   │
-│   └─────────────────┘    └─────────────────┘                   │
-│                                                                │
-│   Prediction: Golden Retriever (94.7%)                         │
-│   ████████████████████████████████████████░░░                  │
-│                                                                │
-│   Top-5: Golden Retriever, Labrador, Cocker Spaniel...         │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10+
-- Node.js 18+ (for web demo)
-- GPU training supported (RTX 3050 recommended)
-- 8GB+ RAM
-- 20GB disk space (for dataset)
-
-### Quick Start
-
-```bash
-# Clone the repository
-git clone https://github.com/RushikeshMasalkar/SelfHealingNN.git
-cd SelfHealingNN
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or
-venv\Scripts\activate     # Windows
-
-# Install dependencies (choose one)
-pip install -r requirements-dev.txt    # For development/inference
-pip install -r requirements-train.txt  # For GPU training (CUDA cu121)
-```
-
-### Download Dataset
-
-```bash
-# Dataset downloads automatically on first run via torchvision.datasets.CIFAR100
-# No manual Kaggle setup is required
-```
-
-### Train Models
-
-```bash
-# Train ConvVAE (Stage A) - ~6 hours on RTX 3050
-python -m src.train_vae
-
-# Train ResNet-18 Classifier (Stage B) - ~2 hours
-python -m src.train_classifier
-```
-
-### Run Web Demo
-
-```bash
-# Terminal 1: Start backend
-cd web/backend
-npm install
-node server.js
-
-# Terminal 2: Start frontend
-cd web/frontend
-npm install
-npm run dev
-
-# Open http://localhost:5173
-```
-
----
-
-## Two-Machine Workflow
-
-This project supports distributed development where training can run on a powerful CPU machine and inference/development can run on a lighter machine.
-
-### Machine Roles
-
-| Machine | Role | Requirements |
-|---------|------|--------------|
-| **Development** | Code, inference, web demo | Any laptop, CPU sufficient |
-| **Training** | Dataset download, model training | Powerful CPU |
-
-### On Development Machine (Your Laptop)
-
-```bash
-git clone https://github.com/RushikeshMasalkar/SelfHealingNN.git
-cd SelfHealingNN
-pip install -r requirements-dev.txt
-jupyter lab
-```
-
-### On Training Machine (Powerful CPU)
-
-```bash
-git clone https://github.com/RushikeshMasalkar/SelfHealingNN.git
-cd SelfHealingNN
-bash setup_training.sh
-python -m src.train_vae
-python -m src.train_classifier
-```
-
-Training time: 12-20 hours on a powerful CPU.
-
-### Transfer Trained Models
-
-After training completes, transfer these files to the development machine:
-
-```
-models/
-├── conv_vae_best.pth      (~200 MB)
-└── resnet_classifier.pth  (~45 MB)
-```
-
----
-
-## Documentation
-
-### Jupyter Notebooks
-
-| Notebook | Description |
-|----------|-------------|
-| `01_Data_and_Noise.ipynb` | Dataset exploration, noise injection visualization |
-| `02_ConvVAE_Training.ipynb` | VAE architecture, training loop, loss curves |
-| `03_ResNet_Classifier.ipynb` | Classifier fine-tuning, transfer learning |
-| `04_Pipeline_Integration.ipynb` | End-to-end inference, model chaining |
-| `05_Evaluation_and_Results.ipynb` | Metrics computation, result visualization |
-
-### Configuration
-
-All hyperparameters are centralized in `configs/config.yaml`:
-
-See **[configs/config.yaml](configs/config.yaml)** for the live values. Overview:
-
-```yaml
-dataset:
-  name: cifar100
-  image_size: 32
-  train_split: 0.9
-
-noise:
-  types: [gaussian, salt_pepper]
-  gaussian_std: 0.15
-  salt_pepper_prob: 0.05
-
-evaluation:
-  gaussian_stress_levels: [0.1, 0.2, 0.3, 0.5, 0.7]
-
-vae:
-  latent_dim: 256
-  beta: 0.5
-  beta_warmup_epochs: 15
-
-classifier:
-  head_learning_rate: 0.001
-  learning_rate: 0.0001
-  clean_input_mix_prob: 0.5
-  phase1_epochs: 10
-  phase2_epochs: 40
-```
-
-### API Reference
-
-#### Inference Pipeline
-
-```python
-from src.pipeline import SelfHealingPipeline
-
-# Initialize pipeline
-pipeline = SelfHealingPipeline(
-    vae_path="models/conv_vae_best.pth",
-    classifier_path="models/resnet_classifier.pth",
-    device="cuda"
-)
-
-# Run inference
-result = pipeline.predict(image_tensor)
-# Returns: {"class_id": 42, "class_name": "golden_retriever", "confidence": 0.947}
-```
-
-#### Noise Injection
-
-```python
-from src.dataset import NoiseInjector
-
-injector = NoiseInjector()
-
-# Apply different noise types
-noisy = injector.add_gaussian_noise(image, std=0.2)
-noisy = injector.add_salt_pepper(image, prob=0.1)
-```
-
----
-
-## Project Structure
-
-```
+Pipeline flow:
+
+`corrupted input -> ConvVAE healer -> normalized classifier input -> ResNet-18 prediction`
+
+Implementation details:
+
+- The VAE reconstructs images in the `[0, 1]` range and is trained on noisy/clean image pairs.
+- The classifier uses a pretrained ResNet-18 with a CIFAR-friendly stem: 3x3 stride-1 convolution, no initial max-pool, and a custom MLP head.
+- The pipeline normalizes the VAE output before classification, which matches the behavior in [src/pipeline.py](src/pipeline.py).
+
+## Key Defaults
+
+Values below come from [configs/config.yaml](configs/config.yaml).
+
+| Area | Default |
+|---|---|
+| Dataset | CIFAR-100 |
+| Image size | 32 x 32 |
+| Dataset root | `./data/raw/` |
+| Normalization | CIFAR-100 mean/std |
+| Noise types | `gaussian`, `salt_pepper` |
+| Gaussian noise | `0.03` for training/eval config |
+| Salt & pepper | `0.005` for training/eval config |
+| VAE latent dim | `256` |
+| VAE beta | `0.01` |
+| VAE warmup | `20` epochs |
+| VAE learning rate | `0.0002` |
+| Classifier backbone | `resnet18` |
+| Classifier learning rate | `0.0001` |
+| Classifier head LR | `0.001` |
+| Clean/healed mix prob | `0.5` |
+| Phase 1 epochs | `10` |
+| Phase 2 epochs | `50` |
+
+## Repository Layout
+
+```text
 SelfHealingNN/
 ├── configs/
-│   └── config.yaml              # Centralized hyperparameters
+│   └── config.yaml
 ├── data/
-│   ├── raw/                     # CIFAR-100 (torchvision download)
-│   ├── processed/               # Preprocessed tensors (optional)
-│   └── samples/                 # Sample images for testing
+│   ├── raw/
+│   ├── processed/
+│   └── samples/
 ├── models/
-│   ├── conv_vae_best.pth        # Trained VAE weights
-│   └── resnet_classifier.pth    # Trained classifier weights
+│   ├── conv_vae_best.pth
+│   ├── conv_vae_last.pth
+│   └── resnet_classifier.pth
 ├── notebooks/
 │   ├── 01_Data_and_Noise.ipynb
 │   ├── 02_ConvVAE_Training.ipynb
@@ -444,143 +72,151 @@ SelfHealingNN/
 │   ├── 04_Pipeline_Integration.ipynb
 │   └── 05_Evaluation_and_Results.ipynb
 ├── outputs/
-│   ├── plots/                   # Training curves, visualizations
-│   └── results/                 # Evaluation metrics, reports
+│   ├── plots/
+│   └── results/
 ├── src/
-│   ├── __init__.py
-│   ├── dataset.py               # Data loading, noise injection
-│   ├── conv_vae.py              # VAE architecture
-│   ├── classifier.py            # ResNet-18 wrapper
-│   ├── pipeline.py              # End-to-end inference
-│   ├── train_vae.py             # VAE training script
-│   ├── train_classifier.py      # Classifier training script
-│   └── evaluate.py              # Train-matched + stress metrics, confusion matrices
-├── web/
-│   ├── backend/
-│   │   ├── routes/
-│   │   │   ├── classify.js      # Inference API endpoint
-│   │   │   └── metrics.js       # Metrics API endpoint
-│   │   ├── server.js            # Express server
-│   │   └── package.json
-│   └── frontend/
-│       ├── src/
-│       │   ├── components/      # React components
-│       │   ├── App.jsx
-│       │   ├── main.jsx
-│       │   └── index.css
-│       ├── index.html
-│       ├── vite.config.js
-│       ├── tailwind.config.js
-│       └── package.json
-├── requirements-dev.txt         # Development dependencies (CPU)
-├── requirements-train.txt       # Training dependencies (GPU)
-├── setup_training.sh            # One-click training setup
-├── .gitignore
-├── LICENSE
-└── README.md
+│   ├── classifier.py
+│   ├── conv_vae.py
+│   ├── dataset.py
+│   ├── evaluate.py
+│   ├── pipeline.py
+│   ├── train_classifier.py
+│   └── train_vae.py
+└── web/
+    ├── backend/
+    │   ├── server.js
+    │   └── routes/
+    │       ├── classify.js
+    │       └── metrics.js
+    └── frontend/
+        └── src/
+            ├── App.jsx
+            └── components/
 ```
 
----
+## Getting Started
 
-## Requirements
+### Prerequisites
 
-### requirements-dev.txt (Development Machine)
+- Python 3.10+
+- Node.js 18+ for the web demo
+- 8 GB+ RAM recommended
+- Optional GPU for training
 
-```
-torch==2.1.0
-torchvision==0.16.0
-numpy==1.24.3
-matplotlib==3.7.2
-Pillow==10.0.0
-scikit-image==0.21.0
-scikit-learn==1.3.0
-pandas==2.0.3
-pyyaml==6.0.1
-tqdm==4.66.1
-torchinfo==1.8.0
-seaborn==0.12.2
-jupyter==1.0.0
-ipykernel==6.25.0
-notebook==7.0.6
+### Create an environment
+
+Windows PowerShell:
+
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
 ```
 
-### requirements-train.txt (Training Machine)
+Linux or macOS:
 
-```
-torch==2.1.0+cu118
-torchvision==0.16.0+cu118
-torchaudio==2.1.0+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
-numpy==1.24.3
-matplotlib==3.7.2
-Pillow==10.0.0
-scikit-image==0.21.0
-scikit-learn==1.3.0
-pandas==2.0.3
-pyyaml==6.0.1
-tqdm==4.66.1
-torchinfo==1.8.0
-seaborn==0.12.2
-kaggle==1.5.16
-jupyter==1.0.0
-ipykernel==6.25.0
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements-dev.txt
 ```
 
----
+For GPU training, use:
 
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-
-- Python: Follow PEP 8, use type hints
-- JavaScript: ESLint + Prettier
-- Commits: Conventional Commits format
-
----
-
-## Citation
-
-If you use this work in your research, please cite:
-
-```bibtex
-@misc{selfhealingnn2024,
-  author = {Rushikesh Masalkar},
-  title = {Self-Healing Neural Network: Robust Image Classification Under Severe Corruption},
-  year = {2024},
-  publisher = {GitHub},
-  url = {https://github.com/RushikeshMasalkar/SelfHealingNN}
-}
+```bash
+pip install -r requirements-train.txt
 ```
 
----
+## Training
+
+From the repository root:
+
+```bash
+python -m src.train_vae
+python -m src.train_classifier
+```
+
+The training scripts write checkpoints and metrics to `models/` and `outputs/results/`.
+
+Expected artifacts:
+
+- `models/conv_vae_best.pth`
+- `models/conv_vae_last.pth`
+- `models/resnet_classifier.pth`
+
+## Evaluation
+
+Run the evaluation entry point after both models are available:
+
+```bash
+python -m src.evaluate
+```
+
+The evaluation module reports:
+
+- accuracy
+- top-5 accuracy
+- macro F1
+- expected calibration error
+- PSNR and SSIM for reconstruction quality
+
+The notebook [05_Evaluation_and_Results.ipynb](notebooks/05_Evaluation_and_Results.ipynb) is the easiest place to inspect the full set of plots and summaries.
+
+## Web Demo
+
+The web app is split into a small Express backend and a React frontend.
+
+### Backend
+
+```bash
+cd web/backend
+npm install
+npm run start
+```
+
+Available endpoints:
+
+- `GET /api/health`
+- `POST /api/classify`
+- `GET /api/metrics`
+- `GET /api/samples`
+
+The current backend returns demo data for UI testing, not live Python inference.
+
+### Frontend
+
+```bash
+cd web/frontend
+npm install
+npm run dev
+```
+
+The frontend uses React, Vite, Framer Motion, Recharts, and Tailwind CSS.
+
+## Notebooks
+
+| Notebook | Purpose |
+|---|---|
+| [01_Data_and_Noise.ipynb](notebooks/01_Data_and_Noise.ipynb) | Dataset exploration and noise visualization |
+| [02_ConvVAE_Training.ipynb](notebooks/02_ConvVAE_Training.ipynb) | VAE training and reconstruction analysis |
+| [03_ResNet_Classifier.ipynb](notebooks/03_ResNet_Classifier.ipynb) | Classifier training and fine-tuning |
+| [04_Pipeline_Integration.ipynb](notebooks/04_Pipeline_Integration.ipynb) | End-to-end healing plus prediction |
+| [05_Evaluation_and_Results.ipynb](notebooks/05_Evaluation_and_Results.ipynb) | Metrics, plots, and comparison tables |
+
+If a notebook kernel starts in a different working directory, keep paths anchored to the repository root or use the path resolution already built into the training code.
+
+## Configuration Notes
+
+- [configs/config.yaml](configs/config.yaml) controls dataset paths, noise settings, model hyperparameters, and evaluation sweeps.
+- The pipeline normalizes classifier inputs with CIFAR-100 mean/std before prediction.
+- The VAE decoder uses a sigmoid output layer, so reconstructed pixels are in `[0, 1]` before normalization.
+
+## Results Output
+
+Evaluation summaries are written under `outputs/results/` and include per-condition metrics, confusion matrices, and protocol summaries.
+
+If you retrain the models, treat the generated files in `outputs/results/` and `models/` as the source of truth for reported numbers.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## Acknowledgments
-
-- CIFAR-100 dataset from torchvision
-- PyTorch team for the deep learning framework
-- ResNet architecture from [Deep Residual Learning](https://arxiv.org/abs/1512.03385)
-- VAE fundamentals from [Auto-Encoding Variational Bayes](https://arxiv.org/abs/1312.6114)
-
----
-
-<div align="center">
-
-**Built with PyTorch + React**
-
-[Report Bug](https://github.com/RushikeshMasalkar/SelfHealingNN/issues) | [Request Feature](https://github.com/RushikeshMasalkar/SelfHealingNN/issues)
-
-</div>
+MIT License. See [LICENSE](LICENSE).
